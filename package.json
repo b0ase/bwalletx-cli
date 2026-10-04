@@ -1,0 +1,33 @@
+{
+  "name": "bwalletx",
+  "version": "0.1.0",
+  "description": "bWalletX CLI and MCP server: run bWalletX agent accounts from the command line",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "bwalletx": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^2.8.11",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "commander": "^15.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

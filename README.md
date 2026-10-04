@@ -1,0 +1,151 @@
+# bwalletx: the bWalletX CLI and MCP server
+
+Run bWalletX **agent accounts** from the command line or from any MCP client (Claude Desktop, Claude Code,
+Cursor). v1 is **standalone mode**: the CLI holds one agent account's exported key file, encrypted with a
+passphrase. Paired mode (scoped tokens from the app) comes later; `bwalletx login` says so.
+
+Only agent accounts can be exported, never the main wallet. The agent account's balance is the budget.
+
+## Install (from source)
+
+```bash
+git clone <this repo> bwalletx-cli && cd bwalletx-cli
+pnpm install
+pnpm build
+pnpm link --global      # puts `bwalletx` on your PATH (or run `node dist/cli.js`)
+```
+
+Node 20+ required.
+
+## Import an agent account
+
+In bWalletX: Settings › Agents › account › Export key file. Then:
+
+```bash
+bwalletx key import ./trader.key.json     # asks for the passphrase (or set BWALLETX_PASSPHRASE)
+bwalletx accounts
+```
+
+The file is checked by decrypting it once, then stored still encrypted at
+`~/.bwalletx/accounts/<name>.key.json` (mode 600). Keys are only decrypted in memory, when a live
+transaction is signed. Set `BWALLETX_HOME` to keep state somewhere other than `~/.bwalletx`.
+
+### Key file format (`bwalletx.agentkey/1`)
+
+```json
+{"format":"bwalletx.agentkey/1","name":"trader","identityAddress":"1…",
+ "enc":{"kdf":"pbkdf2-sha256","iter":310000,"salt":"<b64 16 bytes>","iv":"<b64 12 bytes>",
+        "alg":"aes-256-gcm","data":"<b64 ciphertext || 16-byte GCM tag>"}}
+```
+
+`data` decrypts to `{"payPk":WIF,"ordPk":WIF,"identityPk":WIF}`. PBKDF2-SHA256 over the UTF-8 passphrase →
+AES-256-GCM, tag appended to the ciphertext exactly as WebCrypto returns it. `src/keyfile.ts`
+(`encryptKeyFile` / `decryptKeyFile`) uses only `crypto.subtle`, so the app can use the same code.
+
+## Commands
+
+```bash
+bwalletx balance --account trader                 # BSV + BSV-21 tokens, valued in USD
+bwalletx price <tokenId>                          # floor price, USD per token
+bwalletx send 5 richard@bwalletx.com --account trader   # $5 of BSV to a paymail or address
+bwalletx buy <tokenId> --max-usd 2 --account trader
+bwalletx strategy load ./accumulator.json --account trader          # paper ($100 pretend book)
+bwalletx strategy load ./accumulator.json --account trader --live   # real money
+bwalletx strategy show | unload
+bwalletx agent run trader --interval 300          # rule-driven loop; Ctrl-C to stop
+bwalletx log --account trader                     # ~/.bwalletx/log/trader.jsonl
+bwalletx stop                                     # kill switch: refuse all spending
+bwalletx resume
+bwalletx cap trader 10                            # optional $10/day cap ("off" to clear)
+bwalletx mcp                                      # stdio MCP server
+```
+
+Add `--json` for machine-readable output. `send` asks for confirmation on a terminal; `-y` skips it.
+
+Token ids are BSV-21 ids (`txid_vout`). `send` moves BSV, so when a strategy is loaded its `rules.tokens`
+must include `"BSV"`, `actions` must include `"send"`, and the recipient must be in `sendTo`.
+
+## The gate
+
+Every spending action, from the CLI, `agent run` or MCP, passes the same checks in this order:
+
+1. **Kill switch** (`bwalletx stop`, file `~/.bwalletx/STOP`) or the account is stopped
+2. **Daily cap** for the account (if set)
+3. **Rate limit**: at most 30 spending actions per hour per account (paper and failed attempts count)
+4. **Strategy rules** (`bwalletx.strategy/1`; same `parseStrategy` / `checkRules` / `paperFill` as the app)
+5. **Paper mode** fills on the paper book and never signs
+
+Every refusal is logged with the rule that refused it.
+
+## Strategies
+
+Same format as the app; see `docs/STRATEGY-FORMAT.md` in the bWalletX repo. Example:
+
+```json
+{
+  "format": "bwalletx.strategy/1",
+  "name": "Slow accumulator",
+  "version": "1.0",
+  "goals": "Build a position slowly while the price is low.",
+  "rules": {
+    "tokens": ["<bsv21 id txid_vout>"],
+    "actions": ["buy"],
+    "buyBelowUsd": 0.001,
+    "maxPerTradeUsd": 2,
+    "maxPerDayUsd": 10,
+    "maxTotalUsd": 200,
+    "stop": { "holdTokens": 100000 }
+  }
+}
+```
+
+`agent run` needs no AI: each tick, for every BSV-21 id in `rules.tokens`, if `buy` is allowed and the floor
+price is at or below `buyBelowUsd`, it asks to buy `maxPerTradeUsd` worth. The gate decides.
+
+## Live vs paper (v1)
+
+| Action | Paper | Live |
+| --- | --- | --- |
+| balance, price, log | yes | yes (read-only) |
+| send BSV (address or paymail) | yes | **yes**: P2PKH from the pay key, WhatsOnChain UTXOs, ARC (GorillaPool) broadcast with WhatsOnChain fallback; paymail via P2P destinations or basic paymentDestination |
+| buy BSV-21 | yes (fills at the floor on the paper book) | **not yet**: refuses with "live buy not yet supported in CLI; use paper or the app" |
+
+Live sends sign with the account's key file; set `BWALLETX_PASSPHRASE` for unattended use (MCP, servers).
+1-sat outputs are never spent as fee money, so ordinals and tokens on the pay address are safe.
+
+## MCP
+
+Tools: `accounts`, `balance`, `price`, `send`, `buy`, `strategy_show`, `strategy_load` (always loads in
+paper mode; going live is a human step), `log`, `stop_all`. Spending tools use the gate above.
+
+**Claude Code**
+
+```bash
+claude mcp add bwalletx -e BWALLETX_PASSPHRASE=your-passphrase-here -- bwalletx mcp
+```
+
+**Claude Desktop** (`claude_desktop_config.json`) and **Cursor** (`~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "bwalletx": {
+      "command": "bwalletx",
+      "args": ["mcp"],
+      "env": { "BWALLETX_PASSPHRASE": "your-passphrase-here" }
+    }
+  }
+}
+```
+
+Leave out `BWALLETX_PASSPHRASE` to keep MCP read-only and paper-only: live sends then fail with
+"No passphrase". If `bwalletx` isn't on the PATH, use `"command": "node", "args": ["/path/to/bwalletx-cli/dist/cli.js", "mcp"]`.
+
+## Development
+
+```bash
+pnpm build
+pnpm test      # keyfile round-trip, strategy rules, gate order, rate limit, paper book, offline send signing
+```
+
+Tests use freshly generated throwaway keys only.
