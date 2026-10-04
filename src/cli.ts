@@ -137,13 +137,16 @@ program
 
 program
   .command('buy <tokenId>')
-  .description('buy a BSV-21 token for at most --max-usd')
+  .description('buy a BSV-21 token for at most --max-usd (cheapest whole buyable listing; +1% market fee)')
   .requiredOption('--max-usd <n>', 'most dollars to spend')
   .option('-a, --account <name>')
+  .option('-y, --yes', 'do not ask for confirmation')
+  .option('--dry-run', 'build and verify against the real listing with throwaway keys and synthetic funding; never broadcasts')
   .action(
-    run(async (id: string, o: { maxUsd: string; account?: string }) => {
-      const r = await act.buy(id, Number(o.maxUsd), o.account);
-      print(r, () => r.text);
+    run(async (id: string, o: { maxUsd: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
+      const skip = o.yes || !!process.env.BWALLETX_YES;
+      const r = await act.buy(id, Number(o.maxUsd.replace(/^\$/, '')), o.account, Date.now(), { dryRun: o.dryRun, ...(!skip && { confirm }) });
+      print(r, () => r.text + (r.txid ? `\n  https://whatsonchain.com/tx/${r.txid}` : ''));
       if (!r.ok) process.exitCode = 1;
     }),
   );

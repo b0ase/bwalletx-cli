@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@1sat/templates':
+        specifier: 0.0.41
+        version: 0.0.41(@bsv/sdk@2.8.11)
       '@bsv/sdk':
         specifier: ^2.8.11
         version: 2.8.11
@@ -33,9 +36,23 @@ importers:
 
 packages:
 
+  '@1sat/templates@0.0.41':
+    resolution: {integrity: sha512-r/gQ/F4xuZRC13x0RApp+CANQKRKYOoyz9pB2z2W0mVtypFKPCa04ScWzeaYwU8P91qJjLRUJ4Lg1PMoSFYbTg==}
+    peerDependencies:
+      '@bsv/sdk': ^2.6.0
+
+  '@1sat/types@0.0.50':
+    resolution: {integrity: sha512-F3tFqk9daBMWdew0NePJsRavZwMhtQK3DXX7RYthC/nwuOdWFI43ZU5Es7vWC6wsQIB3r/34x3nC43Cq9pDdNw==}
+    peerDependencies:
+      '@bsv/sdk': ^2.6.0
+
   '@bsv/sdk@2.8.11':
     resolution: {integrity: sha512-Kt70E52bGTCayebmKQJCmEKCFwwS1MOUJ4Q4mKLCadsktVpZMv4NoWjvEbO7VDIw3g5zo8RMJsTuRy5zFI77og==}
     engines: {node: '>=22'}
+
+  '@cto.af/wtf8@0.0.6':
+    resolution: {integrity: sha512-xp/zbWLXuh2WBxi9tIc+Jep7BAwLu8ETTI8xN68ks10bxOBMISs/jcu9DBEkOeGXLaTKUbA0Y2Ficx/jmmPABg==}
+    engines: {node: '>=20'}
 
   '@hono/node-server@2.1.3':
     resolution: {integrity: sha512-TA//nWMqPhbfdfneACk6t5a9eqbS9lABEPyKn0/xZTah3H3U2XaVg85rJFl0/Fyit0I552YDHgXGVSf3GwqbUw==}
@@ -339,6 +356,10 @@ packages:
   call-bound@1.0.4:
     resolution: {integrity: sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg==}
     engines: {node: '>= 0.4'}
+
+  cbor2@2.4.0:
+    resolution: {integrity: sha512-s6+CPoEI6tgwasK2cWMTXt5sy8Yxo4vgRmKgkJSCdKDL/0bHU3aYJoYeHRX7/oywKYA3bxcpqEYkXkrdHe0+0Q==}
+    engines: {node: '>=22'}
 
   chai@6.3.0:
     resolution: {integrity: sha512-XWAtwJ6OHO+tj0EKCs0Y2UamnyOxseZWltU4x2U2wh8g4AigdjwvtUjvLP2tqkA/avxHEtzxNaqGq/YGNwckKg==}
@@ -915,7 +936,19 @@ packages:
 
 snapshots:
 
+  '@1sat/templates@0.0.41(@bsv/sdk@2.8.11)':
+    dependencies:
+      '@1sat/types': 0.0.50(@bsv/sdk@2.8.11)
+      '@bsv/sdk': 2.8.11
+      cbor2: 2.4.0
+
+  '@1sat/types@0.0.50(@bsv/sdk@2.8.11)':
+    dependencies:
+      '@bsv/sdk': 2.8.11
+
   '@bsv/sdk@2.8.11': {}
+
+  '@cto.af/wtf8@0.0.6': {}
 
   '@hono/node-server@2.1.3(hono@4.13.13)':
     dependencies:
@@ -1128,6 +1161,10 @@ snapshots:
     dependencies:
       call-bind-apply-helpers: 1.0.2
       get-intrinsic: 1.3.0
+
+  cbor2@2.4.0:
+    dependencies:
+      '@cto.af/wtf8': 0.0.6
 
   chai@6.3.0: {}
 

@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as act from './actions.js';
-import { appendLog, readConfig, setAllStopped } from './store.js';
+import { appendLog, getLoaded, readConfig, resolveAccount, setAllStopped } from './store.js';
 
 const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] });
 const wrap =
@@ -43,10 +43,15 @@ export async function runMcp(version: string) {
   server.registerTool(
     'buy',
     {
-      description: 'Buy a BSV-21 token for at most maxUsd. Gated like send. Paper mode fills on the paper book; live buy is not yet supported in the CLI.',
+      description:
+        'Buy a BSV-21 token for at most maxUsd: the cheapest whole buyable 1Sat listing that fits, plus the 1% bWalletX market fee. Gated like send. Paper mode fills on the paper book; live signs and broadcasts (needs BWALLETX_PASSPHRASE in the server env).',
       inputSchema: { tokenId: z.string(), maxUsd: z.number().positive(), account },
     },
-    wrap(({ tokenId, maxUsd, account: a }: { tokenId: string; maxUsd: number; account?: string }) => act.buy(tokenId, maxUsd, a)),
+    wrap(async ({ tokenId, maxUsd, account: a }: { tokenId: string; maxUsd: number; account?: string }) => {
+      const name = resolveAccount(a).name;
+      if (getLoaded(name)?.mode !== 'paper' && !process.env.BWALLETX_PASSPHRASE) return { ok: false, text: 'Live buy needs BWALLETX_PASSPHRASE in the MCP server env' };
+      return act.buy(tokenId, maxUsd, name);
+    }),
   );
   server.registerTool(
     'strategy_show',

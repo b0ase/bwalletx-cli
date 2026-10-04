@@ -16,7 +16,7 @@ export async function utxos(address: string): Promise<Utxo[]> {
   return Array.isArray(r) ? r : (r.result ?? []);
 }
 
-async function rawTx(txid: string): Promise<string> {
+export async function rawTx(txid: string): Promise<string> {
   let res = await fetch(`${WOC}/tx/${txid}/hex`, { signal: AbortSignal.timeout(15_000) });
   for (let i = 1; res.status === 429 && i <= 3; i++) {
     await new Promise((r) => setTimeout(r, 800 * i));

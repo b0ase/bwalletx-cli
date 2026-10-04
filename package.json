@@ -1,6 +1,6 @@
 {
   "name": "bwalletx",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "bWalletX CLI and MCP server: run bWalletX agent accounts from the command line",
   "type": "module",
   "license": "MIT",
@@ -21,6 +21,7 @@
     "prepublishOnly": "pnpm build && pnpm test"
   },
   "dependencies": {
+    "@1sat/templates": "0.0.41",
     "@bsv/sdk": "^2.8.11",
     "@modelcontextprotocol/sdk": "^1.32.0",
     "commander": "^15.0.0",

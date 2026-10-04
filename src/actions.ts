@@ -1,7 +1,9 @@
 /** Operations shared by the CLI, `agent run` and the MCP server. Every spend goes through gateAction. */
 import { readFileSync } from 'node:fs';
 import { decryptKeyFile, validateKeyFile, type AgentKeys } from './keyfile.js';
-import { bsvBalanceSats, bsvUsd, listings, normTokenId, pickListing, tokenBalances, tokenPrice, TOKEN_ID } from './market.js';
+import { bsvBalanceSats, bsvUsd, listings, normTokenId, outpointUnspent, overlayFee, overlayValid, pickListing, submitOverlay, tokenBalances, tokenPrice, TOKEN_ID } from './market.js';
+import { P2PKH, PrivateKey, Transaction } from '@bsv/sdk';
+import { buildPurchase, marketFeeSats, verifyPurchase } from './buy.js';
 import { getPassphrase } from './passphrase.js';
 import { gateAction } from './gate.js';
 import { parseStrategy, type Loaded } from './strategy.js';
@@ -19,9 +21,7 @@ import {
   writeConfig,
   type AccountConfig,
 } from './store.js';
-import { addressOf, broadcast, buildSend, notifyP2p, resolveDestination, DEFAULT_SATS_PER_KB } from './wallet.js';
-
-export const LIVE_BUY_UNSUPPORTED = 'live buy not yet supported in CLI; use paper or the app';
+import { addressOf, broadcast, buildSend, notifyP2p, rawTx, resolveDestination, utxos, DEFAULT_SATS_PER_KB } from './wallet.js';
 
 export async function importKey(file: string, passphrase?: string) {
   const parsed = validateKeyFile(JSON.parse(readFileSync(file, 'utf8')));
@@ -121,31 +121,135 @@ export async function send(usd: number, to: string, account?: string, opts: { pa
   }
 }
 
-export type BuyResult = { ok: boolean; paper?: boolean; text: string; txid?: string };
+export type BuyResult = { ok: boolean; paper?: boolean; dryRun?: boolean; text: string; txid?: string; outpoint?: string; sats?: number };
+export type BuyOpts = {
+  passphrase?: string;
+  satsPerKb?: number;
+  /** Asked with the exact totals after the tx is built and verified, before broadcast. Omit to skip (agent/MCP). */
+  confirm?: (question: string) => Promise<boolean>;
+  /** Build + verify against the real listing with throwaway keys and a synthetic funding coin; never broadcasts. */
+  dryRun?: boolean;
+};
 
-/** Buy a BSV-21 token for at most maxUsd. Paper: fills at the floor. Live: not yet (see LIVE_BUY_UNSUPPORTED). */
-export async function buy(tokenId: string, maxUsd: number, account?: string, now = Date.now()): Promise<BuyResult> {
-  const a = resolveAccount(account);
+/** Cheapest whole listing that fits maxUsd and that the 1Sat overlay holds as valid (the app's `buyable`). */
+async function pickBuyable(id: string, maxUsd: number) {
+  const [rate, m] = await Promise.all([bsvUsd(), listings(id)]);
+  const fits = m.listings.filter((l) => (l.priceSats / 1e8) * rate <= maxUsd + 1e-9);
+  const valid = await overlayValid(id, fits.map((l) => l.outpoint));
+  return { rate, m, pick: pickListing(fits.filter((l) => valid.has(l.outpoint)), maxUsd, rate), fits: fits.length };
+}
+
+const parseOutpoint = (o: string) => {
+  const [txid, vout] = o.split('_');
+  return { txid: txid!, vout: Number(vout) };
+};
+
+/**
+ * Buy a BSV-21 token for at most maxUsd. Paper: fills at the floor. Live: takes the cheapest whole
+ * buyable listing whose price fits, through the same gate (with the total incl. fees), then builds,
+ * verifies every input script locally and broadcasts. See buy.ts.
+ */
+export async function buy(tokenId: string, maxUsd: number, account?: string, now = Date.now(), opts: BuyOpts = {}): Promise<BuyResult> {
   const id = normTokenId(tokenId);
   if (!TOKEN_ID.test(id)) throw new Error('Token must be a BSV-21 id (txid_vout)');
   if (!(maxUsd > 0)) throw new Error('--max-usd must be a positive number');
-  const [rate, m] = await Promise.all([bsvUsd(), listings(id)]);
-  const ticker = m.info.sym ?? undefined;
-  const floor = m.listings[0];
-  if (!floor) return { ok: false, text: 'No live listings for that token' };
-  const priceUsd = (floor.pricePerTokenSats / 1e8) * rate;
+  if (opts.dryRun) return buyDryRun(id, maxUsd);
+  const a = resolveAccount(account);
   const loaded = getLoaded(a.name);
   const paper = loaded?.mode === 'paper';
-  // Paper fills a fractional amount at the floor; live must take a whole listing that fits.
-  const pick = paper ? null : pickListing(m.listings, maxUsd, rate);
-  if (!paper && !pick) return { ok: false, text: `No listing fits $${maxUsd.toFixed(2)} (cheapest per token: $${priceUsd.toPrecision(3)})` };
-  const usd = paper ? maxUsd : (pick!.priceSats / 1e8) * rate;
-  const amount = paper ? usd / priceUsd : pick!.tokens;
-  const g = gateAction(a.name, { kind: 'buy', token: id, ticker, usd, priceUsd, amount }, {}, now);
+  if (paper) {
+    const [rate, m] = await Promise.all([bsvUsd(), listings(id)]);
+    const floor = m.listings[0];
+    if (!floor) return { ok: false, text: 'No live listings for that token' };
+    const priceUsd = (floor.pricePerTokenSats / 1e8) * rate;
+    const ticker = m.info.sym ?? undefined;
+    const amount = maxUsd / priceUsd;
+    const g = gateAction(a.name, { kind: 'buy', token: id, ticker, usd: maxUsd, priceUsd, amount }, {}, now);
+    if (!g.ok) return { ok: false, text: `Refused: ${g.reason}` };
+    return { ok: true, paper: true, text: `Paper buy ${+amount.toFixed(6)} ${ticker ?? id} for $${maxUsd.toFixed(2)} @ $${priceUsd.toPrecision(4)}` };
+  }
+
+  const { rate, m, pick, fits } = await pickBuyable(id, maxUsd);
+  const ticker = m.info.sym ?? undefined;
+  const name = ticker ?? id;
+  if (!m.listings.length) return { ok: false, text: 'No live listings for that token' };
+  if (!pick) {
+    const per = (m.listings[0]!.pricePerTokenSats / 1e8) * rate;
+    return { ok: false, text: fits ? `No buyable listing fits $${maxUsd.toFixed(2)} (the 1Sat overlay does not hold the ${fits} that fit as valid)` : `No listing fits $${maxUsd.toFixed(2)} (cheapest per token: $${per.toPrecision(3)})` };
+  }
+  const ovFee = await overlayFee(id);
+  const feeSats = marketFeeSats(pick.priceSats);
+  const totalSats = pick.priceSats + feeSats + (ovFee?.sats ?? 0);
+  const usd = (totalSats / 1e8) * rate;
+  if (usd > maxUsd * 1.05 + 0.01) return { ok: false, text: `With fees the cheapest fit costs $${usd.toFixed(2)}, over --max-usd $${maxUsd.toFixed(2)}` };
+  const priceUsd = (pick.pricePerTokenSats / 1e8) * rate;
+  const g = gateAction(a.name, { kind: 'buy', token: id, ticker, usd, priceUsd, amount: pick.tokens }, {}, now);
   if (!g.ok) return { ok: false, text: `Refused: ${g.reason}` };
-  if (g.paper) return { ok: true, paper: true, text: `Paper buy ${+amount.toFixed(6)} ${ticker ?? id} for $${usd.toFixed(2)} @ $${priceUsd.toPrecision(4)}` };
-  appendLog(a.name, { at: now, action: 'failed', detail: `Buy ${ticker ?? id} for $${usd.toFixed(2)}: ${LIVE_BUY_UNSUPPORTED}`, usd: 0 });
-  return { ok: false, text: LIVE_BUY_UNSUPPORTED };
+  const rule = loaded?.strategy.name;
+  const fail = (msg: string): BuyResult => {
+    appendLog(a.name, { at: Date.now(), action: 'failed', detail: `Buy ${+pick.tokens.toFixed(6)} ${name} for $${usd.toFixed(2)} failed: ${msg}`, usd: 0 });
+    return { ok: false, text: `Buy failed: ${msg}` };
+  };
+  try {
+    const keys = await unlock(a.name, opts.passphrase);
+    if (!(await outpointUnspent(pick.outpoint))) return fail('listing was just bought or cancelled');
+    const op = parseOutpoint(pick.outpoint);
+    const listingTx = Transaction.fromHex(await rawTx(op.txid));
+    const coins = (await utxos(a.payAddress)).filter((u) => u.value > 1).sort((x, y) => y.value - x.value);
+    const funding: { tx: Transaction; vout: number }[] = [];
+    let have = 0;
+    for (const u of coins) {
+      if (have >= totalSats + 5000) break;
+      funding.push({ tx: Transaction.fromHex(await rawTx(u.tx_hash)), vout: u.tx_pos });
+      have += u.value;
+    }
+    const satsPerKb = opts.satsPerKb ?? readConfig().satsPerKb ?? DEFAULT_SATS_PER_KB;
+    const tx = await buildPurchase({ listingTx, listingVout: op.vout, tokenId: id, buyerOrdAddress: a.ordAddress, payWif: keys.payPk, funding, overlayFee: ovFee, satsPerKb });
+    const v = verifyPurchase(tx, { tokenId: id, buyerOrdAddress: a.ordAddress, payAddress: a.payAddress, overlayFee: ovFee });
+    if (v.payoutSats !== pick.priceSats) return fail(`listing price changed (${v.payoutSats} sats on-chain vs ${pick.priceSats} listed)`);
+    const allUsd = (v.totalSats / 1e8) * rate;
+    const q = `Buy ${+pick.tokens.toFixed(6)} ${name} for $${allUsd.toFixed(2)} (${v.payoutSats} sats to seller + ${v.marketFeeSats} market fee${ovFee ? ` + ${ovFee.sats} overlay fee` : ''} + ${v.networkFee} network fee) from ${a.name}?`;
+    if (opts.confirm && !(await opts.confirm(q))) return { ok: false, text: 'Not confirmed (pass --yes to skip)' };
+    if (!(await outpointUnspent(pick.outpoint))) return fail('listing was just bought or cancelled');
+    const txid = await broadcast(tx);
+    try {
+      await submitOverlay(tx.toBEEF(true), id);
+    } catch {
+      /* best effort, as in the app */
+    }
+    const detail = `Bought ${+pick.tokens.toFixed(6)} ${name} for $${allUsd.toFixed(2)} (${v.totalSats} sats) @ $${priceUsd.toPrecision(4)}`;
+    appendLog(a.name, { at: Date.now(), action: 'buy', detail, usd: allUsd, txid, ...(rule && { rule }) });
+    return { ok: true, text: detail, txid, outpoint: pick.outpoint, sats: v.totalSats };
+  } catch (e) {
+    return fail(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** --dry-run: prove the OrdLock purchase input verifies against the real listing. Throwaway keys; never broadcasts. */
+async function buyDryRun(id: string, maxUsd: number): Promise<BuyResult> {
+  const { rate, m, pick } = await pickBuyable(id, maxUsd);
+  if (!pick) return { ok: false, dryRun: true, text: m.listings.length ? `No buyable listing fits $${maxUsd.toFixed(2)}` : 'No live listings for that token' };
+  const op = parseOutpoint(pick.outpoint);
+  const unspent = await outpointUnspent(pick.outpoint);
+  const listingTx = Transaction.fromHex(await rawTx(op.txid));
+  const ovFee = await overlayFee(id);
+  const pay = PrivateKey.fromRandom();
+  const ord = PrivateKey.fromRandom();
+  const parent = new Transaction();
+  parent.addOutput({ lockingScript: new P2PKH().lock(pay.toAddress()), satoshis: pick.priceSats * 2 + 100_000 });
+  const tx = await buildPurchase({ listingTx, listingVout: op.vout, tokenId: id, buyerOrdAddress: ord.toAddress(), payWif: pay.toWif(), funding: [{ tx: parent, vout: 0 }], overlayFee: ovFee });
+  const v = verifyPurchase(tx, { tokenId: id, buyerOrdAddress: ord.toAddress(), payAddress: pay.toAddress(), overlayFee: ovFee });
+  const usd = (v.totalSats / 1e8) * rate;
+  return {
+    ok: true,
+    dryRun: true,
+    outpoint: pick.outpoint,
+    sats: v.totalSats,
+    text:
+      `Dry run OK: ${pick.outpoint} (${unspent ? 'unspent' : 'SPENT'}) ${+pick.tokens.toFixed(6)} ${m.info.sym ?? id} for $${usd.toFixed(2)}: ` +
+      `${v.payoutSats} sats to seller + ${v.marketFeeSats} market fee${ovFee ? ` + ${ovFee.sats} overlay fee` : ''} + ${v.networkFee} network fee. ` +
+      `All ${tx.inputs.length} input scripts verified (incl. the OrdLock purchase against the real listing). Synthetic funding; nothing signed with your keys, nothing broadcast.`,
+  };
 }
 
 export async function strategyLoad(file: string, account: string | undefined, live: boolean, now = Date.now()) {

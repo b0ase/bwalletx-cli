@@ -2,7 +2,7 @@
  * `bwalletx agent run <account>`: a rule-driven loop, no AI. Each tick, for every BSV-21 id the loaded
  * strategy names, if "buy" is allowed and buyBelowUsd is set and the floor price is at or below it,
  * ask to buy maxPerTradeUsd worth. Every request passes the same gate (stop, daily cap, rate limit,
- * rules); paper mode fills on the $100 paper book; live buys report the CLI's live-buy limitation.
+ * rules); paper mode fills on the $100 paper book; live mode buys for real (buy.ts).
  */
 import { buy } from './actions.js';
 import { price } from './actions.js';

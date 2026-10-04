@@ -102,16 +102,21 @@ Same format as the app; see `docs/STRATEGY-FORMAT.md` in the bWalletX repo. Exam
 `agent run` needs no AI: each tick, for every BSV-21 id in `rules.tokens`, if `buy` is allowed and the floor
 price is at or below `buyBelowUsd`, it asks to buy `maxPerTradeUsd` worth. The gate decides.
 
-## Live vs paper (v1)
+## Live vs paper
 
 | Action | Paper | Live |
 | --- | --- | --- |
 | balance, price, log | yes | yes (read-only) |
 | send BSV (address or paymail) | yes | **yes**: P2PKH from the pay key, WhatsOnChain UTXOs, ARC (GorillaPool) broadcast with WhatsOnChain fallback; paymail via P2P destinations or basic paymentDestination |
-| buy BSV-21 | yes (fills at the floor on the paper book) | **not yet**: refuses with "live buy not yet supported in CLI; use paper or the app" |
+| buy BSV-21 | yes (fills at the floor on the paper book) | **yes**: takes the cheapest whole 1Sat OrdLock (v1) listing that fits `--max-usd` and that the 1Sat overlay holds as valid; pays the seller exactly as the lock encodes, adds the 1% bWalletX market fee and (when active) the overlay fee, sends the tokens to the ord address, change to the pay address. Every input script is verified locally before broadcast. OrdLock v2 listings: not yet (use the app) |
 
 Live sends sign with the account's key file; set `BWALLETX_PASSPHRASE` for unattended use (MCP, servers).
 1-sat outputs are never spent as fee money, so ordinals and tokens on the pay address are safe.
+
+`bwalletx buy <tokenId> --max-usd 5` shows the exact totals (seller, market fee, overlay fee, network fee) and
+asks before broadcasting; `-y` or `BWALLETX_YES=1` skips the prompt. The gate sees the full dollar cost
+including fees. `--dry-run` builds and verifies the purchase against the real listing with throwaway keys and
+a synthetic funding coin, without touching your account or broadcasting.
 
 ## MCP
 

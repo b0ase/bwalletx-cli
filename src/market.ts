@@ -3,7 +3,7 @@ export const WOC = 'https://api.whatsonchain.com/v1/bsv/main';
 export const GP = 'https://ordinals.gorillapool.io/api';
 export const ONESAT = 'https://api.1sat.app/1sat';
 
-const UA = { 'user-agent': 'bwalletx-cli/0.1' };
+const UA = { 'user-agent': 'bwalletx-cli/0.2' };
 export async function getJson<T>(url: string, timeoutMs = 15_000, init?: RequestInit): Promise<T> {
   let res: Response;
   for (let attempt = 0; ; attempt++) {
@@ -80,4 +80,44 @@ export async function tokenBalances(ordAddress: string): Promise<TokenBalance[]>
       return { id: r.id!, sym: r.sym ?? null, dec, amount: raw / 10 ** dec };
     })
     .filter((r) => r.amount > 0);
+}
+
+/** Outpoints of `tokenId` the 1Sat BSV-21 overlay holds as valid (the app's `buyable` rule). Empty on error. */
+export async function overlayValid(tokenId: string, outpoints: string[]): Promise<Set<string>> {
+  if (!outpoints.length) return new Set();
+  try {
+    const rows = await getJson<{ outpoint: string }[] | null>(`${ONESAT}/bsv21/${tokenId}/outputs`, 15_000, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(outpoints),
+    });
+    return new Set((rows ?? []).map((r) => r.outpoint.replace('.', '_')));
+  } catch {
+    return new Set();
+  }
+}
+
+/** The overlay processing fee output @1sat/actions adds when the token's overlay is active, else null. */
+export async function overlayFee(tokenId: string): Promise<{ address: string; sats: number } | null> {
+  const d = await getJson<{ status?: { is_active?: boolean; fee_address?: string; fee_per_output?: number } }>(`${ONESAT}/bsv21/${tokenId}`);
+  const s = d.status;
+  if (!s?.is_active) return null;
+  if (!s.fee_address || !(Number(s.fee_per_output) > 0) || Number(s.fee_per_output) > 100_000) throw new Error('Bad overlay fee data');
+  return { address: s.fee_address, sats: Number(s.fee_per_output) };
+}
+
+/** True when GorillaPool reports the outpoint unspent. Throws if it can't tell. */
+export async function outpointUnspent(outpoint: string): Promise<boolean> {
+  const r = await getJson<{ spend?: string | null }>(`${GP}/txos/${outpoint}?script=false`);
+  return !r.spend;
+}
+
+/** Submit a purchase to the 1Sat BSV-21 overlay (as the app does after buying). Best effort. */
+export async function submitOverlay(beef: number[], tokenId: string): Promise<void> {
+  await fetch(`${ONESAT}/bsv21/overlay/submit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/octet-stream', 'x-topics': `tm_${tokenId}` },
+    body: new Uint8Array(beef),
+    signal: AbortSignal.timeout(15_000),
+  });
 }
