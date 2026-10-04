@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { Command } from 'commander';
 import * as act from './actions.js';
+import { login, unpair } from './paired.js';
 import { agentRun } from './agent.js';
 import { confirm } from './passphrase.js';
 import { keyFilePath, allStopped, appendLog, readConfig, resolveAccount, setAllStopped, updateAccount, writeConfig } from './store.js';
@@ -34,8 +35,21 @@ program
 
 program
   .command('login')
-  .description('pair with the bWalletX app (coming soon)')
-  .action(() => console.log('Pairing with the app is coming; use `bwalletx key import`'));
+  .description('pair with bWalletX on your phone: keys stay on the phone (scan the QR from your agent account)')
+  .option('-a, --account <name>', 'local name for this paired account', 'phone')
+  .action(
+    run(async (o: { account: string }) => {
+      const p = await login(o.account);
+      console.log(`\nPaired "${p.name}" with ${p.account}: ${p.scopes.join(', ')} until ${new Date(p.expiresAt).toLocaleDateString()}.`);
+      console.log('Keep bWalletX open on that account while the CLI works. Try: bwalletx balance --account ' + p.name);
+    }),
+  );
+
+program
+  .command('logout')
+  .description('unpair a paired account (also disconnects it on the phone)')
+  .option('-a, --account <name>', 'paired account', 'phone')
+  .action(run(async (o: { account: string }) => (await unpair(o.account), console.log(`Unpaired ${o.account}.`))));
 
 const key = program.command('key').description('agent account key files');
 key
@@ -166,7 +180,7 @@ strategy
 strategy
   .command('show')
   .option('-a, --account <name>')
-  .action(run((o: { account?: string }) => print(act.strategyShow(o.account))));
+  .action(run(async (o: { account?: string }) => print(await act.strategyShow(o.account))));
 strategy
   .command('unload')
   .option('-a, --account <name>')
@@ -186,8 +200,8 @@ program
   .option('-a, --account <name>')
   .option('-n, --limit <n>', 'entries', '50')
   .action(
-    run((o: { account?: string; limit: string }) => {
-      const rows = act.log(o.account, Number(o.limit));
+    run(async (o: { account?: string; limit: string }) => {
+      const rows = await act.log(o.account, Number(o.limit));
       print(rows, () =>
         rows.map((e) => `${new Date(e.at).toISOString()}  ${e.action.padEnd(12)} ${e.detail}${e.usd ? `  [${usd(e.usd)}]` : ''}${e.rule ? `  (${e.rule})` : ''}${e.txid ? `  ${e.txid}` : ''}`).join('\n') || 'No activity',
       );

@@ -6,8 +6,23 @@ import { P2PKH, PrivateKey, Transaction } from '@bsv/sdk';
 import { buildPurchase, marketFeeSats, verifyPurchase } from './buy.js';
 import { getPassphrase } from './passphrase.js';
 import { gateAction } from './gate.js';
-import { parseStrategy, type Loaded } from './strategy.js';
+import { callPhone } from './paired.js';
+
+// ---- paired accounts: the phone holds the keys and runs its own checks (paired.ts) ----
+type PhoneBalance = { bsv: { sats: number; usd: number | null }; tokens: { id: string; sym?: string; amount: string; dec?: number }[]; paper: unknown };
+const phoneDo = async (name: string, action: string, params: unknown): Promise<{ ok: boolean; text: string; txid?: string }> => {
+  if (allStopped()) return { ok: false, text: 'Refused: all agents are stopped (bwalletx resume)' };
+  try {
+    const r = await callPhone<{ text: string; txid: string | null }>(name, action, params);
+    if (r.txid) appendLog(name, { at: Date.now(), action, detail: r.text, usd: 0, txid: r.txid });
+    return { ok: true, text: r.text, ...(r.txid && { txid: r.txid }) };
+  } catch (e) {
+    return { ok: false, text: e instanceof Error ? e.message : String(e) };
+  }
+};
+import { parseStrategy, type Loaded, type PaperBook, type AgentLogEntry } from './strategy.js';
 import {
+  allStopped,
   appendLog,
   getLoaded,
   getPaper,
@@ -63,6 +78,12 @@ export const listAccounts = () => {
 
 export async function balance(account?: string) {
   const a = resolveAccount(account);
+  if (a.kind === 'paired') {
+    const [b, usd] = await Promise.all([callPhone<PhoneBalance>(a.name, 'balance'), bsvUsd()]);
+    const tokens = b.tokens.map((t) => ({ id: t.id, sym: t.sym, amount: Number(t.amount) / 10 ** (t.dec ?? 0), priceUsd: null, valueUsd: null }));
+    const bsvValue = b.bsv.usd ?? (b.bsv.sats / 1e8) * usd;
+    return { account: a.name, payAddress: '', ordAddress: '', bsvUsd: usd, bsv: { sats: b.bsv.sats, usd: bsvValue }, tokens, totalUsd: bsvValue, paper: (b.paper as PaperBook | null) ?? undefined };
+  }
   const [usd, sats, toks] = await Promise.all([bsvUsd(), bsvBalanceSats(a.payAddress), tokenBalances(a.ordAddress)]);
   const tokens = await Promise.all(
     toks.slice(0, 20).map(async (t) => {
@@ -95,6 +116,7 @@ export type SendResult = { ok: boolean; paper?: boolean; text: string; txid?: st
 export async function send(usd: number, to: string, account?: string, opts: { passphrase?: string; satsPerKb?: number } = {}): Promise<SendResult> {
   const a = resolveAccount(account);
   if (!(usd > 0) || usd > 1e6) throw new Error('Amount must be a positive number of dollars');
+  if (a.kind === 'paired') return phoneDo(a.name, 'send', { usd, to });
   const rate = await bsvUsd();
   const sats = Math.round((usd / rate) * 1e8);
   if (sats < 1) throw new Error('Amount is less than 1 satoshi');
@@ -155,6 +177,7 @@ export async function buy(tokenId: string, maxUsd: number, account?: string, now
   if (!(maxUsd > 0)) throw new Error('--max-usd must be a positive number');
   if (opts.dryRun) return buyDryRun(id, maxUsd);
   const a = resolveAccount(account);
+  if (a.kind === 'paired') return phoneDo(a.name, 'buy', { tokenId: id, usd: maxUsd }) as Promise<BuyResult>;
   const loaded = getLoaded(a.name);
   const paper = loaded?.mode === 'paper';
   if (paper) {
@@ -257,6 +280,11 @@ export async function strategyLoad(file: string, account: string | undefined, li
   const a = resolveAccount(account);
   const r = parseStrategy(readFileSync(file, 'utf8'));
   if (!r.ok) throw new Error(`Strategy refused:\n  - ${r.errors.join('\n  - ')}`);
+  if (a.kind === 'paired') {
+    if (live) throw new Error('A paired account loads strategies on paper; switch to live in bWalletX (Agents › Strategy › Run live).');
+    await callPhone(a.name, 'strategy_load', { strategy: r.strategy });
+    return { account: a.name, mode: 'paper' as const, strategy: r.strategy };
+  }
   const mode: Loaded['mode'] = live ? 'live' : 'paper';
   let startValueUsd: number | undefined;
   if (live && r.strategy.rules.stop?.downPct) startValueUsd = (await balance(a.name)).totalUsd;
@@ -266,14 +294,19 @@ export async function strategyLoad(file: string, account: string | undefined, li
   return { account: a.name, mode, strategy: r.strategy };
 }
 
-export const strategyShow = (account?: string) => {
+export const strategyShow = async (account?: string) => {
   const a = resolveAccount(account);
+  if (a.kind === 'paired') {
+    const l = await callPhone<Loaded | null>(a.name, 'strategy_show');
+    return l ? { account: a.name, ...l } : { account: a.name, strategy: null };
+  }
   const l = getLoaded(a.name);
   return l ? { account: a.name, ...l, ...(l.mode === 'paper' && { paper: getPaper(a.name) }) } : { account: a.name, strategy: null };
 };
 
 export const strategyUnload = (account?: string) => {
   const a = resolveAccount(account);
+  if (a.kind === 'paired') throw new Error('Unload a paired account’s strategy in bWalletX (Agents › Strategy › Unload).');
   const l = getLoaded(a.name);
   if (!l) return false;
   setLoaded(a.name, null);
@@ -281,7 +314,8 @@ export const strategyUnload = (account?: string) => {
   return true;
 };
 
-export const log = (account?: string, limit = 50) => {
+export const log = async (account?: string, limit = 50) => {
   const a = resolveAccount(account);
+  if (a.kind === 'paired') return callPhone<AgentLogEntry[]>(a.name, 'log', { limit });
   return readLog(a.name).slice(-limit);
 };

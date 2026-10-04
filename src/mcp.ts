@@ -35,7 +35,7 @@ export async function runMcp(version: string) {
     'send',
     {
       description:
-        'Send BSV worth `usd` dollars to an address or paymail. Gated: kill switch, daily cap, rate limit, strategy rules (token "BSV" and sendTo must allow it). Paper mode never signs. Live needs BWALLETX_PASSPHRASE in the server env.',
+        'Send BSV worth `usd` dollars to an address or paymail. Gated: kill switch, daily cap, rate limit, strategy rules (token "BSV" and sendTo must allow it). Paper mode never signs. Live needs BWALLETX_PASSPHRASE in the server env (key-file accounts) or a paired phone with bWalletX open.',
       inputSchema: { usd: z.number().positive(), to: z.string(), account },
     },
     wrap(({ usd, to, account: a }: { usd: number; to: string; account?: string }) => act.send(usd, to, a)),
@@ -44,12 +44,13 @@ export async function runMcp(version: string) {
     'buy',
     {
       description:
-        'Buy a BSV-21 token for at most maxUsd: the cheapest whole buyable 1Sat listing that fits, plus the 1% bWalletX market fee. Gated like send. Paper mode fills on the paper book; live signs and broadcasts (needs BWALLETX_PASSPHRASE in the server env).',
+        'Buy a BSV-21 token for at most maxUsd: the cheapest whole buyable 1Sat listing that fits, plus the 1% bWalletX market fee. Gated like send. Paper mode fills on the paper book; live signs and broadcasts (key-file accounts need BWALLETX_PASSPHRASE; paired accounts are signed on the phone).',
       inputSchema: { tokenId: z.string(), maxUsd: z.number().positive(), account },
     },
     wrap(async ({ tokenId, maxUsd, account: a }: { tokenId: string; maxUsd: number; account?: string }) => {
       const name = resolveAccount(a).name;
-      if (getLoaded(name)?.mode !== 'paper' && !process.env.BWALLETX_PASSPHRASE) return { ok: false, text: 'Live buy needs BWALLETX_PASSPHRASE in the MCP server env' };
+      const paired = resolveAccount(a).kind === 'paired'; // the phone signs: no passphrase here
+      if (!paired && getLoaded(name)?.mode !== 'paper' && !process.env.BWALLETX_PASSPHRASE) return { ok: false, text: 'Live buy needs BWALLETX_PASSPHRASE in the MCP server env' };
       return act.buy(tokenId, maxUsd, name);
     }),
   );

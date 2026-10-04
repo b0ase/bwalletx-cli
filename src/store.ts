@@ -15,6 +15,8 @@ import { PAPER_START_USD } from './strategy.js';
 
 export type AccountConfig = {
   name: string;
+  /** 'key' = imported key file (standalone); 'paired' = keys stay on the phone (bwalletx login). */
+  kind?: 'key' | 'paired';
   identityAddress: string;
   payAddress: string;
   ordAddress: string;
@@ -33,6 +35,8 @@ const safe = (name: string) => {
   return name;
 };
 
+export const readJsonFile = <T>(file: string): T | null => readJson<T>(file);
+export const writeJsonFile = (file: string, v: unknown, mode = 0o600) => writeJson(file, v, mode);
 const readJson = <T>(file: string): T | null => {
   try {
     return JSON.parse(readFileSync(file, 'utf8')) as T;

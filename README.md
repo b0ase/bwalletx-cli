@@ -6,6 +6,28 @@ passphrase. Paired mode (scoped tokens from the app) comes later; `bwalletx logi
 
 Only agent accounts can be exported, never the main wallet. The agent account's balance is the budget.
 
+## Install
+
+```sh
+npm i -g bwalletx      # Node 20+
+```
+
+## Pair with your phone (recommended)
+
+Keys stay on your phone. In bWalletX (5.1.40+), open your **agent account**, then run:
+
+```sh
+bwalletx login --account phone
+```
+
+Scan the QR in the terminal from bWalletX (Settings › Paired websites › Scan to connect), check both screens show the same
+4-digit code, choose what the CLI may do (see balances; buy and load strategies; send BSV) and for how long (1, 7 or 30 days),
+then tap **Pair**. Every command for that account becomes an end-to-end encrypted request: bWalletX checks it against the
+account's Stop switch, daily cap and loaded strategy, then signs it. Keep bWalletX open on that account while the CLI works.
+Disconnect any time in the app (Settings › Paired websites) or with `bwalletx logout --account phone`.
+
+For unattended servers where no phone is around, import a key file instead (below).
+
 ## Install (from source)
 
 ```bash
