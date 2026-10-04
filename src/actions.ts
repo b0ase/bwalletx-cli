@@ -169,7 +169,8 @@ export async function buy(tokenId: string, maxUsd: number, account?: string, now
     return { ok: true, paper: true, text: `Paper buy ${+amount.toFixed(6)} ${ticker ?? id} for $${maxUsd.toFixed(2)} @ $${priceUsd.toPrecision(4)}` };
   }
 
-  const { rate, m, pick, fits } = await pickBuyable(id, maxUsd);
+  // Choose a listing whose price leaves room for the 1% market fee: --max-usd is a hard ceiling on the total.
+  const { rate, m, pick, fits } = await pickBuyable(id, maxUsd / 1.012);
   const ticker = m.info.sym ?? undefined;
   const name = ticker ?? id;
   if (!m.listings.length) return { ok: false, text: 'No live listings for that token' };
@@ -181,7 +182,7 @@ export async function buy(tokenId: string, maxUsd: number, account?: string, now
   const feeSats = marketFeeSats(pick.priceSats);
   const totalSats = pick.priceSats + feeSats + (ovFee?.sats ?? 0);
   const usd = (totalSats / 1e8) * rate;
-  if (usd > maxUsd * 1.05 + 0.01) return { ok: false, text: `With fees the cheapest fit costs $${usd.toFixed(2)}, over --max-usd $${maxUsd.toFixed(2)}` };
+  if (usd > maxUsd + 1e-9) return { ok: false, text: `With fees the cheapest fit costs $${usd.toFixed(2)}, over --max-usd $${maxUsd.toFixed(2)}` };
   const priceUsd = (pick.pricePerTokenSats / 1e8) * rate;
   const g = gateAction(a.name, { kind: 'buy', token: id, ticker, usd, priceUsd, amount: pick.tokens }, {}, now);
   if (!g.ok) return { ok: false, text: `Refused: ${g.reason}` };
