@@ -9,6 +9,7 @@
  */
 import { PrivateKey } from '@bsv/sdk';
 import QRCode from 'qrcode';
+import { brandQr, yellow } from './brand.js';
 import WebSocket from 'ws';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -77,8 +78,8 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
     let infoId = '';
     const timer = setTimeout(() => !sealer && (ws.close(), resolve(null)), QR_LIFETIME_S * 1000 - 5000);
     ws.on('open', async () => {
-      out(await QRCode.toString(link, { type: 'terminal', small: true }));
-      out('In bWalletX: open your AGENT account, then Settings › Paired websites › Scan to connect');
+      out(brandQr(await QRCode.toString(link, { type: 'terminal', small: true })));
+      out(yellow('In bWalletX: open your AGENT account, then Settings › Paired websites › Scan to connect'));
       out(`Or open this link on the phone:\n${link}\n`);
     });
     ws.on('error', (err) => !sealer && (clearTimeout(timer), reject(new Error(`Pairing service unreachable: ${err.message}`))));

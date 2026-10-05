@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { banner } from './brand.js';
 import { readFileSync } from 'node:fs';
 import { Command } from 'commander';
 import * as act from './actions.js';
@@ -39,6 +40,7 @@ program
   .option('-a, --account <name>', 'local name for this paired account', 'phone')
   .action(
     run(async (o: { account: string }) => {
+      if (!asJson) await banner();
       const p = await login(o.account);
       console.log(`\nPaired "${p.name}" with ${p.account}: ${p.scopes.join(', ')} until ${new Date(p.expiresAt).toLocaleDateString()}.`);
       console.log('Keep bWalletX open on that account while the CLI works. Try: bwalletx balance --account ' + p.name);
@@ -226,4 +228,10 @@ program
     }),
   );
 
-await program.parseAsync();
+// Bare `bwalletx`: the banner, then help.
+if (process.argv.length <= 2) {
+  await banner();
+  program.outputHelp();
+} else {
+  await program.parseAsync();
+}
