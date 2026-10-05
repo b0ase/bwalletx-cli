@@ -3,6 +3,7 @@ import { banner } from './brand.js';
 import { readFileSync } from 'node:fs';
 import { Command } from 'commander';
 import * as act from './actions.js';
+import * as mint from './mint.js';
 import { login, unpair } from './paired.js';
 import { agentRun } from './agent.js';
 import { confirm } from './passphrase.js';
@@ -164,6 +165,73 @@ program
       const r = await act.buy(id, Number(o.maxUsd.replace(/^\$/, '')), o.account, Date.now(), { dryRun: o.dryRun, ...(!skip && { confirm }) });
       print(r, () => r.text + (r.txid ? `\n  https://whatsonchain.com/tx/${r.txid}` : ''));
       if (!r.ok) process.exitCode = 1;
+    }),
+  );
+
+const printSummary = (r: mint.Summary) =>
+  print(r, () => {
+    if (r.dryRun)
+      return r.estimate
+        ? `Dry run: ${r.estimate.sats.toLocaleString()} sats at ${r.estimate.satsPerKb} sat/kB${r.estimate.usd !== null ? ` ≈ ${usd(r.estimate.usd)}` : ''} (incl. the 1% mint fee; first item ×2 when it creates the collection). Nothing sent.`
+        : 'Dry run.';
+    return [
+      `Minted ${r.minted.length}${r.skipped.length ? `, skipped ${r.skipped.length} already minted` : ''}.`,
+      ...(r.collectionId ? [`Collection: ${r.collectionId}`] : []),
+      ...r.minted.map((m) => `  ${m.title.padEnd(40)} ${m.txid}`),
+      `Total: ${r.totalSats.toLocaleString()} sats ${usd(r.totalUsd)}`,
+    ].join('\n');
+  });
+
+const collectionOf = (o: { collection?: string; collectionId?: string }): mint.CollectionChoice => {
+  if (o.collection && o.collectionId) throw new Error('Use --collection (new) or --collection-id (existing), not both');
+  if (o.collectionId) {
+    if (!/^[0-9a-f]{64}_\d+$/.test(o.collectionId)) throw new Error('--collection-id must be <txid>_<vout>');
+    return { kind: 'existing', id: o.collectionId };
+  }
+  return o.collection ? { kind: 'new', name: o.collection } : { kind: 'none' };
+};
+
+program
+  .command('mint <files...>')
+  .description('mint files as NFTs on your paired phone (pairing scope "Mint NFTs"; the phone signs within its limits)')
+  .option('-a, --account <name>', 'paired account')
+  .option('--collection <name>', 'create this collection with the first file and add the rest to it')
+  .option('--collection-id <id>', 'add to an existing collection of yours (<txid>_<vout>)')
+  .option('--title <title>', 'title (one file only)')
+  .option('--title-from-filename', 'title each item from its file name')
+  .option('--description <text>', 'description for every item')
+  .option('--dry-run', 'print sizes and the cost estimate only; nothing is sent')
+  .action(
+    run(async (files: string[], o: { account?: string; collection?: string; collectionId?: string; title?: string; titleFromFilename?: boolean; description?: string; dryRun?: boolean }) => {
+      if (o.title && files.length > 1) throw new Error('--title is for one file; use --title-from-filename for several');
+      if (!o.title && !o.titleFromFilename) throw new Error('Give --title, or --title-from-filename');
+      const items = files.map((f) => ({ file: f, title: o.title ?? mint.titleFromFilename(f) }));
+      printSummary(await mint.runMint(items, { account: o.account, collection: collectionOf(o), description: o.description, dryRun: o.dryRun, out: asJson ? () => {} : console.log }));
+    }),
+  );
+
+program
+  .command('mint-manifest <manifest>')
+  .description('mint every entry of a manifest ([{ title, file, sha256? }]) in order; resumable via <manifest>.progress.json')
+  .option('-a, --account <name>', 'paired account')
+  .option('--collection <name>', 'create this collection with the first entry and add the rest to it')
+  .option('--collection-id <id>', 'add every entry to an existing collection of yours')
+  .option('--description <text>', 'description for every item')
+  .option('--dry-run', 'print sizes and the cost estimate only; nothing is sent')
+  .action(
+    run(async (manifest: string, o: { account?: string; collection?: string; collectionId?: string; description?: string; dryRun?: boolean }) => {
+      const progressPath = mint.progressPathFor(manifest);
+      printSummary(
+        await mint.runMint(mint.readManifest(manifest), {
+          account: o.account,
+          collection: collectionOf(o),
+          description: o.description,
+          dryRun: o.dryRun,
+          progressPath,
+          out: asJson ? () => {} : console.log,
+        }),
+      );
+      if (!o.dryRun && !asJson) console.log(`Progress: ${progressPath} (rerun the same command to resume)`);
     }),
   );
 

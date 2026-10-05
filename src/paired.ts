@@ -45,7 +45,10 @@ export type Pairing = {
   scopes: string[];
   expiresAt: number;
   pairedAt: number;
+  /** Set when the pairing includes "Mint NFTs": the limits chosen on the phone. */
+  mint?: MintInfo | null;
 };
+export type MintInfo = { maxItems: number; maxUsd: number; itemsUsed: number; spentUsd: number; itemsLeft: number; usdLeft: number };
 
 const file = (name: string) => join(home(), 'paired', `${name}.json`);
 export const readPairing = (name: string) => readJsonFile<Pairing>(file(name));
@@ -79,7 +82,7 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
     const timer = setTimeout(() => !sealer && (ws.close(), resolve(null)), QR_LIFETIME_S * 1000 - 5000);
     ws.on('open', async () => {
       out(brandQr(await QRCode.toString(link, { type: 'terminal', small: true })));
-      out(yellow('In bWalletX: open your AGENT account, then Settings › Paired websites › Scan to connect'));
+      out(yellow('In bWalletX: open the account to use (an AGENT account, or any account for minting only), then Settings › Paired websites › Scan to connect'));
       out(`Or open this link on the phone:\n${link}\n`);
     });
     ws.on('error', (err) => !sealer && (clearTimeout(timer), reject(new Error(`Pairing service unreachable: ${err.message}`))));
@@ -101,7 +104,7 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
         ws.send(JSON.stringify(await sealer.seal({ t: 'req', id: infoId, action: 'info', params: {} })));
       } else if (msg.t === 'res' && msg.id === infoId) {
         if (msg.error) return (ws.close(), reject(new Error(msg.error.message)));
-        const i = msg.result as { account: string; identityAddress: string; scopes: string[]; expiresAt: number };
+        const i = msg.result as { account: string; identityAddress: string; scopes: string[]; expiresAt: number; mint?: MintInfo | null };
         const p: Pairing = {
           format: 'bwalletx.pairing/1',
           name,
@@ -115,6 +118,7 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
           scopes: i.scopes,
           expiresAt: i.expiresAt,
           pairedAt: Date.now(),
+          mint: i.mint ?? null,
         };
         savePairing(p);
         const cfg = readConfig();
@@ -140,48 +144,114 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
   });
 }
 
-/** One request to the phone. The app must be open (and unlocked) on the paired agent account. */
-export async function callPhone<T = unknown>(name: string, action: string, params: unknown = {}): Promise<T> {
-  const p = readPairing(name);
-  if (!p) throw new Error(`"${name}" isn't a paired account`);
-  if (Date.now() > p.expiresAt) throw new Error(`The pairing for ${name} expired. Run \`bwalletx login --account ${name}\` again.`);
-  const { key } = await deriveSession(PrivateKey.fromHex(p.s), p.k, p.c);
-  const sealer = new Sealer(key, 'site');
-  sealer.restore({ sent: p.sent, lastSeen: p.lastSeen });
-  const id = `${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  // A fresh expiry lets the relay recreate the channel if it was dropped; the phone rejoins on its own.
-  const ws = open(relaySocketUrl(p.r, p.c, 'site', Math.floor(Date.now() / 1000) + QR_LIFETIME_S - 10));
-  const persist = () => savePairing({ ...p, ...sealer.counters });
-  try {
-    return await new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error(`No answer from your phone. Open bWalletX on "${p.account}" (unlocked) and try again.`)),
-        CALL_TIMEOUT_MS,
-      );
-      ws.on('error', (e) => (clearTimeout(timer), reject(new Error(`Pairing service unreachable: ${e.message}`))));
-      ws.on('open', async () => {
-        ws.send(JSON.stringify(await sealer.seal({ t: 'req', id, action, params } satisfies PairMessage)));
-        persist();
-      });
-      ws.on('message', async (raw) => {
-        const f = JSON.parse(String(raw)) as unknown;
-        if (!isSealed(f)) return;
-        const msg = await sealer.open(f);
-        if (!msg) return;
-        persist();
-        if (msg.t === 'res' && msg.id === id) {
-          clearTimeout(timer);
-          if (msg.error) reject(Object.assign(new Error(msg.error.message), { code: msg.error.code }));
-          else resolve(msg.result as T);
-        } else if (msg.t === 'close') {
-          clearTimeout(timer);
-          forgetPairing(name);
-          reject(new Error('Disconnected on the phone. Run `bwalletx login` to pair again.'));
-        }
-      });
+/**
+ * The relay allows 60 frames a minute per channel (both directions) and 4 MB per frame. A request and
+ * its answer are two frames, so requests are spaced at least this far apart.
+ */
+export const MIN_REQUEST_GAP_MS = 2_200;
+
+/**
+ * One open connection to the phone for many requests (minting a batch). The app must be open (and
+ * unlocked) on the paired account. Counters are saved after every frame, so a crash can't replay.
+ */
+export class PhoneSession {
+  private ws!: WebSocket;
+  private sealer!: Sealer;
+  private p!: Pairing;
+  private waiting = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+  private lastSend = 0;
+  private closed = false;
+  private constructor(private name: string) {}
+
+  static async open(name: string): Promise<PhoneSession> {
+    const s = new PhoneSession(name);
+    await s.connect();
+    return s;
+  }
+
+  get pairing() {
+    return this.p;
+  }
+
+  private async connect() {
+    const p = readPairing(this.name);
+    if (!p) throw new Error(`"${this.name}" isn't a paired account`);
+    if (Date.now() > p.expiresAt) throw new Error(`The pairing for ${this.name} expired. Run \`bwalletx login --account ${this.name}\` again.`);
+    this.p = p;
+    const { key } = await deriveSession(PrivateKey.fromHex(p.s), p.k, p.c);
+    this.sealer = new Sealer(key, 'site');
+    this.sealer.restore({ sent: p.sent, lastSeen: p.lastSeen });
+    // A fresh expiry lets the relay recreate the channel if it was dropped; the phone rejoins on its own.
+    this.ws = open(relaySocketUrl(p.r, p.c, 'site', Math.floor(Date.now() / 1000) + QR_LIFETIME_S - 10));
+    await new Promise<void>((resolve, reject) => {
+      this.ws.once('open', () => resolve());
+      this.ws.once('error', (e) => reject(new Error(`Pairing service unreachable: ${e.message}`)));
     });
+    this.ws.on('message', (raw) => void this.onFrame(String(raw)));
+    this.ws.on('close', () => this.failAll(new Error('Connection to the pairing service closed.')));
+  }
+
+  private persist() {
+    savePairing({ ...readPairing(this.name)!, ...this.sealer.counters });
+  }
+
+  private failAll(e: Error) {
+    for (const [, w] of this.waiting) (clearTimeout(w.timer), w.reject(e));
+    this.waiting.clear();
+  }
+
+  private async onFrame(raw: string) {
+    const f = JSON.parse(raw) as unknown;
+    if ((f as { t?: string; error?: string }).t === 'relay' && (f as { error?: string }).error)
+      return this.failAll(new Error(`Pairing service: ${(f as { error: string }).error}`));
+    if (!isSealed(f)) return;
+    const msg = await this.sealer.open(f);
+    if (!msg) return;
+    this.persist();
+    if (msg.t === 'res') {
+      const w = this.waiting.get(msg.id);
+      if (!w) return;
+      clearTimeout(w.timer);
+      this.waiting.delete(msg.id);
+      if (msg.error) w.reject(Object.assign(new Error(msg.error.message), { code: msg.error.code }));
+      else w.resolve(msg.result);
+    } else if (msg.t === 'close') {
+      forgetPairing(this.name);
+      this.failAll(new Error('Disconnected on the phone. Run `bwalletx login` to pair again.'));
+    }
+  }
+
+  async call<T = unknown>(action: string, params: unknown = {}, timeoutMs = CALL_TIMEOUT_MS): Promise<T> {
+    if (this.closed) throw new Error('Session closed');
+    const wait = this.lastSend + MIN_REQUEST_GAP_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    this.lastSend = Date.now();
+    const id = `${action}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.waiting.delete(id);
+        reject(new Error(`No answer from your phone. Open bWalletX on "${this.p.account}" (unlocked) and try again.`));
+      }, timeoutMs);
+      this.waiting.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+    });
+    this.ws.send(JSON.stringify(await this.sealer.seal({ t: 'req', id, action, params } satisfies PairMessage)));
+    this.persist();
+    return result;
+  }
+
+  close() {
+    this.closed = true;
+    this.ws.close();
+  }
+}
+
+/** One request to the phone. The app must be open (and unlocked) on the paired account. */
+export async function callPhone<T = unknown>(name: string, action: string, params: unknown = {}): Promise<T> {
+  const s = await PhoneSession.open(name);
+  try {
+    return await s.call<T>(action, params);
   } finally {
-    ws.close();
+    s.close();
   }
 }
 
