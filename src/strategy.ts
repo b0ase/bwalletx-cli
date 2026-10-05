@@ -1,5 +1,5 @@
 /**
- * Strategies (bwalletx.strategy/1). COPIED from the app (yours-mobile-bcorp
+ * Strategies (bwalletx.strategy/1). COPIED from the app (bwalletX
  * src/mobile/agents/strategy.ts + the pure parts of agentAccounts.ts) with storage removed.
  * Keep these functions byte-for-byte in behaviour with the app: the same file must be refused
  * or allowed the same way everywhere. Nothing here signs or touches disk.
