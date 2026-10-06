@@ -316,7 +316,6 @@ brc
   .description("move the account's plain BSV (its pay address) into its BRC-100 wallet")
   .option('-a, --account <name>', 'agent account')
   .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
-  .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .action(
     run(async (o: { account?: string; shared?: boolean }) => {
       const { name, keys, b, w } = await brc100Account(o.account, o.shared);
@@ -369,6 +368,7 @@ brc
   .command('balance')
   .description("the BRC-100 wallet's spendable BSV")
   .option('-a, --account <name>', 'agent account')
+  .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .action(
     run(async (o: { account?: string; shared?: boolean }) => {
       const { name, b, w } = await brc100Account(o.account, o.shared);
