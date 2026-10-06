@@ -406,6 +406,7 @@ brc
           'bwalletx-cli',
         );
         await w.sendWaiting();
+        await b.relayToArc(r).catch(() => undefined);
         appendLog(name, { at: Date.now(), action: 'send', detail: `BRC-100 withdraw ${sats} sats to ${address} ${r.txid ?? ''}`, usd: (sats / 1e8) * rate });
         print({ txid: r.txid, sats }, () => `Sent ${sats.toLocaleString()} sats to ${address}: ${r.txid}`);
       } finally {

@@ -232,6 +232,24 @@ export function outgoingSats(args: CreateActionArgs): number {
   return Math.max(0, out - brought);
 }
 
+/**
+ * The toolbox's default broadcasters can land a transaction at WhatsOnChain without it ever reaching
+ * the miners (seen live: two agent txs sat unmined until re-sent to ARC). So everything the agent signs
+ * is also handed to GorillaPool's ARC, as Extended Format when the BEEF carries the parents. Idempotent.
+ */
+export async function relayToArc(result: unknown, url = 'https://arc.gorillapool.io') {
+  const tx = (result as { tx?: number[] } | null)?.tx;
+  if (!tx?.length) return;
+  const t = sdk.Transaction.fromAtomicBEEF(Array.from(tx));
+  let rawTx: string;
+  try {
+    rawTx = t.toHexEF();
+  } catch {
+    rawTx = t.toHex();
+  }
+  await fetch(`${url}/v1/tx`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rawTx }), signal: AbortSignal.timeout(15_000) });
+}
+
 /** Calls a site may make. Everything else (privileged key linkage, certificates) is refused. */
 const ALLOWED = new Set([
   'createAction',
@@ -330,6 +348,7 @@ export async function serve(w: AgentWallet, o: ServeOptions) {
 
     try {
       const out = await api[call](args, host);
+      if (call === 'createAction' || call === 'signAction') relayToArc(out).catch(() => undefined);
       if (LOGGED.has(call)) {
         const a = args as { description?: string };
         const r = out as { txid?: string };
