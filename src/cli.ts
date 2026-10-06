@@ -365,6 +365,7 @@ brc
           { description: 'bwalletx withdraw', outputs: [{ lockingScript: new P2PKH().lock(address).toHex(), satoshis: sats, outputDescription: 'withdraw' }], options: { acceptDelayedBroadcast: false } },
           'bwalletx-cli',
         );
+        await w.sendWaiting();
         appendLog(name, { at: Date.now(), action: 'send', detail: `BRC-100 withdraw ${sats} sats to ${address} ${r.txid ?? ''}`, usd: (sats / 1e8) * rate });
         print({ txid: r.txid, sats }, () => `Sent ${sats.toLocaleString()} sats to ${address}: ${r.txid}`);
       } finally {
@@ -382,6 +383,7 @@ program
   .action(
     run(async (o: { account?: string; origin: string[]; port: string }) => {
       const { name, b, w } = await brc100Account(o.account);
+      w.startMonitor();
       const sats = await b.walletBalance(w).catch(() => 0);
       await b.serve(w, { account: name, origins: o.origin, port: Number(o.port), onEvent: (l) => console.log(`${new Date().toLocaleTimeString()}  ${l}`) });
       console.log(`bWalletX agent "${name}" is a BRC-100 wallet on http://localhost:${o.port}`);

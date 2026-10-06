@@ -33,7 +33,16 @@ const toolbox = require('@bsv/wallet-toolbox') as typeof import('@bsv/wallet-too
 const { Beef, CachedKeyDeriver, PrivateKey, normalizeBRC100WalletByteFields, stringifyBRC100 } = sdk;
 const { Monitor, Services, Setup, StorageKnex, WalletStorageManager } = toolbox;
 
-export type AgentWallet = { wallet: Wallet; identityKey: string; payAddress: string; close: () => Promise<void> };
+export type AgentWallet = {
+  wallet: Wallet;
+  identityKey: string;
+  payAddress: string;
+  /** Broadcast whatever the wallet has queued (the toolbox sends in the background by default). */
+  sendWaiting: () => Promise<void>;
+  /** Run the monitor in the background (broadcasts, proofs, status) while a long-lived command runs. */
+  startMonitor: () => void;
+  close: () => Promise<void>;
+};
 
 /** Open (creating on first use) the agent account's BRC-100 wallet. Root key = the account's pay key. */
 export async function openWallet(account: string, keys: AgentKeys): Promise<AgentWallet> {
@@ -57,6 +66,12 @@ export async function openWallet(account: string, keys: AgentKeys): Promise<Agen
     wallet,
     identityKey,
     payAddress: rootKey.toAddress(),
+    sendWaiting: async () => {
+      await monitor.runTask('SendWaiting').catch(() => undefined);
+    },
+    startMonitor: () => {
+      monitor.startTasks().catch(() => undefined);
+    },
     close: async () => {
       await monitor.destroy().catch(() => undefined);
       await wallet.destroy().catch(() => undefined);
@@ -77,6 +92,8 @@ export async function fundFromPayAddress(w: AgentWallet, payWif: string) {
     coins.map((u) => `${u.tx_hash}.${u.tx_pos}`),
     { privateKey: key, publicKey: key.toPublicKey(), address: w.payAddress } as never,
   );
+  // The toolbox queues new transactions for its monitor to broadcast; send them before we return.
+  await w.sendWaiting();
   const ok = new Set(results.filter((r) => r.success).map((r) => r.outpoint));
   return { moved: ok.size, sats: coins.filter((u) => ok.has(`${u.tx_hash}.${u.tx_pos}`)).reduce((n, u) => n + u.value, 0), results };
 }
