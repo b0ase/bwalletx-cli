@@ -296,6 +296,104 @@ program
     }),
   );
 
+// BRC-100 mode: the agent account as a full BRC-100 wallet, for sites and scripts (standalone accounts).
+const brc100Account = async (name?: string) => {
+  const { isPaired } = await import('./paired.js');
+  const n = name ?? readConfig().defaultAccount ?? Object.keys(readConfig().accounts)[0];
+  if (!n) throw new Error('No accounts yet. Run `bwalletx key import <file>`.');
+  if (isPaired(n)) throw new Error(`"${n}" is paired: its keys stay on the phone, so it can't run as a BRC-100 wallet here. Import an agent key file for this.`);
+  resolveAccount(n);
+  const keys = await act.unlock(n);
+  const b = await import('./brc100.js');
+  return { name: n, keys, b, w: await b.openWallet(n, keys) };
+};
+
+const brc = program.command('brc100').description('the agent account as a BRC-100 wallet (standalone accounts): fund, balance, withdraw');
+brc
+  .command('fund')
+  .description("move the account's plain BSV (its pay address) into its BRC-100 wallet")
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const { name, keys, b, w } = await brc100Account(o.account);
+      try {
+        const r = await b.fundFromPayAddress(w, keys.payPk);
+        appendLog(name, { at: Date.now(), action: 'brc100-fund', detail: `Moved ${r.moved} coins (${r.sats} sats) into the BRC-100 wallet`, usd: 0 });
+        const failed = r.results.filter((x) => !x.success);
+        print(r, () => (r.moved || failed.length ? `Moved ${r.moved} coins (${r.sats} sats) into ${name}'s BRC-100 wallet.${failed.map((f) => `\n  ${f.outpoint}: ${f.error}`).join('')}` : `Nothing to move: no BSV at ${w.payAddress}.`));
+      } finally {
+        await w.close();
+      }
+    }),
+  );
+brc
+  .command('balance')
+  .description("the BRC-100 wallet's spendable BSV")
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const { name, b, w } = await brc100Account(o.account);
+      try {
+        const sats = await b.walletBalance(w);
+        const { bsvUsd } = await import('./market.js');
+        const rate = await bsvUsd();
+        print({ account: name, identityKey: w.identityKey, sats, usd: (sats / 1e8) * rate }, () => `${name}: ${sats.toLocaleString()} sats (${usd((sats / 1e8) * rate)})\n  identity key ${w.identityKey}`);
+      } finally {
+        await w.close();
+      }
+    }),
+  );
+brc
+  .command('withdraw <usd> <address>')
+  .description('send BSV worth <usd> dollars ("all" for everything) from the BRC-100 wallet to an address')
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (amount: string, address: string, o: { account?: string }) => {
+      const { name, b, w } = await brc100Account(o.account);
+      try {
+        const { bsvUsd } = await import('./market.js');
+        const { gateAction } = await import('./gate.js');
+        const { P2PKH } = await import('@bsv/sdk');
+        const rate = await bsvUsd();
+        const have = await b.walletBalance(w);
+        const sats = amount === 'all' ? have - 300 : Math.round((Number(amount) / rate) * 1e8);
+        if (!(sats > 0) || sats > have) throw new Error(`Can't send ${sats} sats: the wallet holds ${have}`);
+        const g = gateAction(name, { kind: 'send', token: 'BSV', usd: (sats / 1e8) * rate, to: address });
+        if (!g.ok) throw new Error(`Refused: ${g.reason}`);
+        if (g.paper) throw new Error('Paper mode: nothing is signed');
+        const r = await w.wallet.createAction(
+          { description: 'bwalletx withdraw', outputs: [{ lockingScript: new P2PKH().lock(address).toHex(), satoshis: sats, outputDescription: 'withdraw' }], options: { acceptDelayedBroadcast: false } },
+          'bwalletx-cli',
+        );
+        appendLog(name, { at: Date.now(), action: 'send', detail: `BRC-100 withdraw ${sats} sats to ${address} ${r.txid ?? ''}`, usd: (sats / 1e8) * rate });
+        print({ txid: r.txid, sats }, () => `Sent ${sats.toLocaleString()} sats to ${address}: ${r.txid}`);
+      } finally {
+        await w.close();
+      }
+    }),
+  );
+
+program
+  .command('serve')
+  .description('serve the agent account as a BRC-100 wallet on http://localhost:3321 for the sites you allow')
+  .option('-a, --account <name>', 'agent account')
+  .requiredOption('-o, --origin <host...>', 'sites allowed to use the wallet, e.g. www.tokenblaster.lol localhost:3000')
+  .option('-p, --port <n>', 'port', '3321')
+  .action(
+    run(async (o: { account?: string; origin: string[]; port: string }) => {
+      const { name, b, w } = await brc100Account(o.account);
+      const sats = await b.walletBalance(w).catch(() => 0);
+      await b.serve(w, { account: name, origins: o.origin, port: Number(o.port), onEvent: (l) => console.log(`${new Date().toLocaleTimeString()}  ${l}`) });
+      console.log(`bWalletX agent "${name}" is a BRC-100 wallet on http://localhost:${o.port}`);
+      console.log(`  identity key ${w.identityKey}`);
+      console.log(`  balance ${sats.toLocaleString()} sats${sats ? '' : ' (run `bwalletx brc100 fund` to move the pay address in)'}`);
+      console.log(`  allowed: ${o.origin.join(', ')}`);
+      console.log('  every spend passes the kill switch, daily cap and rate limit; `bwalletx stop` refuses all. Ctrl-C to stop.');
+      await new Promise<void>((resolve) => process.once('SIGINT', () => resolve()));
+      await w.close();
+    }),
+  );
+
 // Bare `bwalletx`: the banner, then help.
 if (process.argv.length <= 2) {
   await banner();

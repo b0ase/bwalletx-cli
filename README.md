@@ -87,6 +87,29 @@ Add `--json` for machine-readable output. `send` asks for confirmation on a term
 Token ids are BSV-21 ids (`txid_vout`). `send` moves BSV, so when a strategy is loaded its `rules.tokens`
 must include `"BSV"`, `actions` must include `"send"`, and the recipient must be in `sendTo`.
 
+## BRC-100 wallet for sites (`serve`)
+
+A standalone agent account can act as a full BRC-100 wallet, so any BRC-100 site or script can use it:
+launchpads, games, anything that asks for `createAction`, `signAction`, `createSignature`, `listOutputs`.
+
+```bash
+bwalletx brc100 fund      -a trader                      # move the pay address's BSV into the BRC-100 wallet
+bwalletx serve            -a trader --origin www.tokenblaster.lol localhost:3000
+bwalletx brc100 balance   -a trader
+bwalletx brc100 withdraw all 1YourAddress… -a trader     # take it back out
+```
+
+`serve` listens on `http://localhost:3321`, where BRC-100 sites already look for a desktop wallet, so they
+find it the same way they find BSV Desktop. Built on `@bsv/wallet-toolbox`, with its store at
+`~/.bwalletx/brc100/<account>.sqlite`; keys are decrypted into memory only.
+
+- **Allowlist**: only the hosts given with `--origin` get an answer; everyone else gets 403.
+- **The gate**: every `createAction` is checked like a `send` for the BSV it takes out of the account
+  (its outputs minus what the site's own inputs bring in), so the kill switch, daily cap, rate limit and a
+  loaded strategy all apply. Refusals reach the site as a readable wallet error.
+- **Log**: every spend and signature lands in the activity log with the site and txid.
+- Paired accounts can't serve: their keys stay on the phone.
+
 ## The gate
 
 Every spending action, from the CLI, `agent run` or MCP, passes the same checks in this order:

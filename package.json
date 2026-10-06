@@ -1,6 +1,6 @@
 {
   "name": "bwalletx",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "bWalletX CLI and MCP server: run bWalletX agent accounts from the command line",
   "type": "module",
   "license": "MIT",
@@ -23,8 +23,11 @@
   "dependencies": {
     "@1sat/templates": "0.0.41",
     "@bsv/sdk": "^2.8.11",
+    "@bsv/wallet-toolbox": "^2.14.5",
     "@modelcontextprotocol/sdk": "^1.32.0",
+    "better-sqlite3": "^13.0.3",
     "commander": "^15.0.0",
+    "knex": "^3.3.0",
     "qrcode": "^1.5.4",
     "ws": "^8.22.0",
     "zod": "^4.6.5"
