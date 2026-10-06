@@ -99,11 +99,11 @@ bwalletx brc100 balance   -a trader
 bwalletx brc100 withdraw all 1YourAddress… -a trader     # take it back out
 ```
 
-**One wallet with the app.** Since 0.4.0 the BRC-100 wallet is the account's own bWalletX wallet: rooted on its
-identity key, with 1Sat Storage (`https://wallet.1sat.app`) as the active store, so the app and the CLI see the same
-coins. In bWalletX, set that account's active storage to 1Sat Storage (Settings › Wallet Backup), or the app keeps
-writing to the phone and only backs up every 5 minutes. `bwalletx brc100 migrate` moves anything left in the CLI's
-older private wallet (0.3.x, `~/.bwalletx/brc100/<account>.sqlite`) into the shared one.
+By default the BRC-100 wallet is the CLI's own (pay-key root, `~/.bwalletx/brc100/<account>.sqlite`); fund it with
+`brc100 fund`, which also collects from the receive addresses the app shows. `--shared` opens the account's own
+bWalletX wallet instead (identity-key root, 1Sat Storage `https://wallet.1sat.app` as the active store). Use it only
+if the app uses that remote as the account's active storage: bWallet normally keeps the phone's local store active
+and only backs up every 5 minutes, so the two would drift. `brc100 migrate` moves the CLI wallet's balance into it.
 
 `serve` listens on `http://localhost:3321`, where BRC-100 sites already look for a desktop wallet, so they
 find it the same way they find BSV Desktop. Built on `@bsv/wallet-toolbox`; keys are decrypted into memory only.

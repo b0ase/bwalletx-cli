@@ -297,7 +297,7 @@ program
   );
 
 // BRC-100 mode: the agent account as a full BRC-100 wallet, for sites and scripts (standalone accounts).
-const brc100Account = async (name?: string, local = false) => {
+const brc100Account = async (name?: string, shared = false) => {
   const { isPaired } = await import('./paired.js');
   const n = name ?? readConfig().defaultAccount ?? Object.keys(readConfig().accounts)[0];
   if (!n) throw new Error('No accounts yet. Run `bwalletx key import <file>`.');
@@ -305,7 +305,9 @@ const brc100Account = async (name?: string, local = false) => {
   resolveAccount(n);
   const keys = await act.unlock(n);
   const b = await import('./brc100.js');
-  return { name: n, keys, b, w: local ? await b.openWallet(n, keys) : await b.openSharedWallet(keys) };
+  // Default: the CLI's own wallet. --shared opens the account's 1Sat Storage wallet, which only stays in step
+  // with the app if the app uses that remote as the account's active storage (it normally doesn't).
+  return { name: n, keys, b, w: shared ? await b.openSharedWallet(keys) : await b.openWallet(n, keys) };
 };
 
 const brc = program.command('brc100').description('the agent account as a BRC-100 wallet (standalone accounts): fund, balance, withdraw');
@@ -313,9 +315,11 @@ brc
   .command('fund')
   .description("move the account's plain BSV (its pay address) into its BRC-100 wallet")
   .option('-a, --account <name>', 'agent account')
+  .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
+  .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .action(
-    run(async (o: { account?: string }) => {
-      const { name, keys, b, w } = await brc100Account(o.account);
+    run(async (o: { account?: string; shared?: boolean }) => {
+      const { name, keys, b, w } = await brc100Account(o.account, o.shared);
       try {
         const r = await b.fundFromPayAddress(w, keys);
         appendLog(name, { at: Date.now(), action: 'brc100-fund', detail: `Moved ${r.moved} coins (${r.sats} sats) into the BRC-100 wallet`, usd: 0 });
@@ -332,7 +336,7 @@ brc
   .option('-a, --account <name>', 'agent account')
   .action(
     run(async (o: { account?: string }) => {
-      const { name, keys, b, w: shared } = await brc100Account(o.account);
+      const { name, keys, b, w: shared } = await brc100Account(o.account, true);
       const local = await b.openWallet(name, keys);
       try {
         const r = await b.migrateLocalToShared(local, shared, (detail) => appendLog(name, { at: Date.now(), action: 'brc100-migrate-note', detail, usd: 0 }));
@@ -366,8 +370,8 @@ brc
   .description("the BRC-100 wallet's spendable BSV")
   .option('-a, --account <name>', 'agent account')
   .action(
-    run(async (o: { account?: string }) => {
-      const { name, b, w } = await brc100Account(o.account);
+    run(async (o: { account?: string; shared?: boolean }) => {
+      const { name, b, w } = await brc100Account(o.account, o.shared);
       try {
         const sats = await b.walletBalance(w);
         const { bsvUsd } = await import('./market.js');
@@ -382,9 +386,10 @@ brc
   .command('withdraw <usd> <address>')
   .description('send BSV worth <usd> dollars ("all" for everything) from the BRC-100 wallet to an address')
   .option('-a, --account <name>', 'agent account')
+  .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .action(
-    run(async (amount: string, address: string, o: { account?: string }) => {
-      const { name, b, w } = await brc100Account(o.account);
+    run(async (amount: string, address: string, o: { account?: string; shared?: boolean }) => {
+      const { name, b, w } = await brc100Account(o.account, o.shared);
       try {
         const { bsvUsd } = await import('./market.js');
         const { gateAction } = await import('./gate.js');
@@ -413,11 +418,12 @@ program
   .command('serve')
   .description('serve the agent account as a BRC-100 wallet on http://localhost:3321 for the sites you allow')
   .option('-a, --account <name>', 'agent account')
+  .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .requiredOption('-o, --origin <host...>', 'sites allowed to use the wallet, e.g. www.tokenblaster.lol localhost:3000')
   .option('-p, --port <n>', 'port', '3321')
   .action(
-    run(async (o: { account?: string; origin: string[]; port: string }) => {
-      const { name, b, w } = await brc100Account(o.account);
+    run(async (o: { account?: string; origin: string[]; port: string; shared?: boolean }) => {
+      const { name, b, w } = await brc100Account(o.account, o.shared);
       w.startMonitor();
       const sats = await b.walletBalance(w).catch(() => 0);
       await b.serve(w, { account: name, origins: o.origin, port: Number(o.port), onEvent: (l) => console.log(`${new Date().toLocaleTimeString()}  ${l}`) });
