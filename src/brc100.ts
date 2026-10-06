@@ -84,6 +84,9 @@ export async function openWallet(account: string, keys: AgentKeys): Promise<Agen
  * protocol [0,'onesat'] (and the older [0,'p 1sat']), keyID "1sat <n>", counterparty self, n = 0…
  * The app's receive screen shows index 0 and adds more with "new address".
  */
+/** Smallest coin `fund` moves; smaller ones cost about as much in fees as they hold. */
+export const FUND_MIN = 1_000;
+
 export const DEPOSIT_PROTOCOLS: [0, string][] = [
   [0, 'onesat'],
   [0, 'p 1sat'],
@@ -111,13 +114,22 @@ export async function fundFromPayAddress(w: AgentWallet, keys: AgentKeys) {
   let moved = 0;
   let sats = 0;
   for (const src of sources) {
-    const coins = (await utxos(src.address)).filter((u) => u.value > 1);
+    // Skip dust: below FUND_MIN a coin costs about as much to move as it holds.
+    const coins = (await utxos(src.address).catch(() => [])).filter((u) => u.value >= FUND_MIN);
     if (!coins.length) continue;
-    const r = await Setup.fundWalletFromP2PKHOutpoints(
-      w.wallet,
-      coins.map((u) => `${u.tx_hash}.${u.tx_pos}`),
-      { privateKey: src.key, publicKey: src.key.toPublicKey(), address: src.address } as never,
-    );
+    let r: { outpoint: string; success: boolean; error?: string }[];
+    try {
+      r = await Setup.fundWalletFromP2PKHOutpoints(
+        w.wallet,
+        coins.map((u) => `${u.tx_hash}.${u.tx_pos}`),
+        { privateKey: src.key, publicKey: src.key.toPublicKey(), address: src.address } as never,
+      );
+    } catch (e) {
+      // One address failing (e.g. a provider can't serve a source tx) must not block the others.
+      const error = e instanceof Error ? e.message : String(e);
+      results.push(...coins.map((u) => ({ outpoint: `${u.tx_hash}.${u.tx_pos}`, success: false, error, from: `${src.label} ${src.address}` })));
+      continue;
+    }
     const ok = new Set(r.filter((x) => x.success).map((x) => x.outpoint));
     moved += ok.size;
     sats += coins.filter((u) => ok.has(`${u.tx_hash}.${u.tx_pos}`)).reduce((n, u) => n + u.value, 0);
