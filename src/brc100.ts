@@ -30,7 +30,7 @@ export const BRC100_PORT = 3321;
 const require = createRequire(import.meta.url);
 const sdk = require('@bsv/sdk') as typeof import('@bsv/sdk');
 const toolbox = require('@bsv/wallet-toolbox') as typeof import('@bsv/wallet-toolbox');
-const { Beef, CachedKeyDeriver, PrivateKey, normalizeBRC100WalletByteFields, stringifyBRC100 } = sdk;
+const { Beef, CachedKeyDeriver, KeyDeriver, PrivateKey, normalizeBRC100WalletByteFields, stringifyBRC100 } = sdk;
 const { Monitor, Services, Setup, StorageKnex, WalletStorageManager } = toolbox;
 
 export type AgentWallet = {
@@ -80,22 +80,52 @@ export async function openWallet(account: string, keys: AgentKeys): Promise<Agen
 }
 
 /**
- * Move plain BSV sitting at the account's pay address (what the app funds, what `send` spends)
- * into the BRC-100 wallet. Coins of 1 sat are left alone: they may hold ordinals or tokens.
+ * The addresses the bWalletX app shows for this account: BRC-42 children of the identity key at
+ * protocol [0,'onesat'] (and the older [0,'p 1sat']), keyID "1sat <n>", counterparty self, n = 0…
+ * The app's receive screen shows index 0 and adds more with "new address".
  */
-export async function fundFromPayAddress(w: AgentWallet, payWif: string) {
-  const coins = (await utxos(w.payAddress)).filter((u) => u.value > 1);
-  if (!coins.length) return { moved: 0, sats: 0, results: [] as { outpoint: string; success: boolean; error?: string }[] };
-  const key = PrivateKey.fromWif(payWif);
-  const results = await Setup.fundWalletFromP2PKHOutpoints(
-    w.wallet,
-    coins.map((u) => `${u.tx_hash}.${u.tx_pos}`),
-    { privateKey: key, publicKey: key.toPublicKey(), address: w.payAddress } as never,
-  );
+export const DEPOSIT_PROTOCOLS: [0, string][] = [
+  [0, 'onesat'],
+  [0, 'p 1sat'],
+];
+export function appAddresses(identityWif: string, count = 10) {
+  const kd = new KeyDeriver(PrivateKey.fromWif(identityWif));
+  const out: { address: string; key: InstanceType<typeof PrivateKey>; label: string }[] = [];
+  for (const proto of DEPOSIT_PROTOCOLS)
+    for (let n = 0; n < count; n++) {
+      const key = kd.derivePrivateKey(proto, `1sat ${n}`, 'self');
+      out.push({ address: key.toAddress(), key, label: `app receive address ${n}${proto[1] === 'onesat' ? '' : ' (legacy)'}` });
+    }
+  return out;
+}
+
+/**
+ * Move plain BSV into the BRC-100 wallet from the account's pay address (what `send` spends and the
+ * key file names) and from the receive addresses the bWalletX app shows for it.
+ * Coins of 1 sat are left alone: they may hold ordinals or tokens.
+ */
+export async function fundFromPayAddress(w: AgentWallet, keys: AgentKeys) {
+  const pay = PrivateKey.fromWif(keys.payPk);
+  const sources = [{ address: w.payAddress, key: pay, label: 'pay address' }, ...appAddresses(keys.identityPk)];
+  const results: { outpoint: string; success: boolean; error?: string; from?: string }[] = [];
+  let moved = 0;
+  let sats = 0;
+  for (const src of sources) {
+    const coins = (await utxos(src.address)).filter((u) => u.value > 1);
+    if (!coins.length) continue;
+    const r = await Setup.fundWalletFromP2PKHOutpoints(
+      w.wallet,
+      coins.map((u) => `${u.tx_hash}.${u.tx_pos}`),
+      { privateKey: src.key, publicKey: src.key.toPublicKey(), address: src.address } as never,
+    );
+    const ok = new Set(r.filter((x) => x.success).map((x) => x.outpoint));
+    moved += ok.size;
+    sats += coins.filter((u) => ok.has(`${u.tx_hash}.${u.tx_pos}`)).reduce((n, u) => n + u.value, 0);
+    results.push(...r.map((x) => ({ ...x, from: `${src.label} ${src.address}` })));
+  }
   // The toolbox queues new transactions for its monitor to broadcast; send them before we return.
-  await w.sendWaiting();
-  const ok = new Set(results.filter((r) => r.success).map((r) => r.outpoint));
-  return { moved: ok.size, sats: coins.filter((u) => ok.has(`${u.tx_hash}.${u.tx_pos}`)).reduce((n, u) => n + u.value, 0), results };
+  if (moved) await w.sendWaiting();
+  return { moved, sats, results };
 }
 
 export async function walletBalance(w: AgentWallet) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { Beef, P2PKH, PrivateKey, Transaction } from '@bsv/sdk';
-import { outgoingSats } from './brc100';
+import { Beef, P2PKH, PrivateKey, ProtoWallet, PublicKey, Transaction } from '@bsv/sdk';
+import { appAddresses, outgoingSats } from './brc100';
 
 const lock = new P2PKH().lock(PrivateKey.fromRandom().toAddress()).toHex();
 
@@ -27,5 +27,14 @@ describe('outgoingSats', () => {
 
   it('counts outputs in full when the BEEF is unreadable', () => {
     expect(outgoingSats({ description: 'bad beef', inputBEEF: [1, 2, 3], inputs: [{ outpoint: `${'a'.repeat(64)}.0`, inputDescription: 'x', unlockingScriptLength: 1 }], outputs: [{ lockingScript: lock, satoshis: 700, outputDescription: 'out' }] })).toBe(700);
+  });
+});
+
+
+describe('appAddresses', () => {
+  it("matches the bWalletX app's receive address (ProtoWallet getPublicKey forSelf, [0,'onesat'], '1sat 0')", async () => {
+    const id = PrivateKey.fromRandom();
+    const { publicKey } = await new ProtoWallet(id).getPublicKey({ protocolID: [0, 'onesat'], keyID: '1sat 0', forSelf: true });
+    expect(appAddresses(id.toWif(), 1)[0].address).toBe(PublicKey.fromString(publicKey).toAddress());
   });
 });

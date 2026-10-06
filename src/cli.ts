@@ -317,13 +317,30 @@ brc
     run(async (o: { account?: string }) => {
       const { name, keys, b, w } = await brc100Account(o.account);
       try {
-        const r = await b.fundFromPayAddress(w, keys.payPk);
+        const r = await b.fundFromPayAddress(w, keys);
         appendLog(name, { at: Date.now(), action: 'brc100-fund', detail: `Moved ${r.moved} coins (${r.sats} sats) into the BRC-100 wallet`, usd: 0 });
         const failed = r.results.filter((x) => !x.success);
-        print(r, () => (r.moved || failed.length ? `Moved ${r.moved} coins (${r.sats} sats) into ${name}'s BRC-100 wallet.${failed.map((f) => `\n  ${f.outpoint}: ${f.error}`).join('')}` : `Nothing to move: no BSV at ${w.payAddress}.`));
+        print(r, () => (r.moved || failed.length ? `Moved ${r.moved} coins (${r.sats} sats) into ${name}'s BRC-100 wallet.${failed.map((f) => `\n  ${f.outpoint}: ${f.error}`).join('')}` : `Nothing to move: no BSV at ${w.payAddress} or the app's receive addresses.`));
       } finally {
         await w.close();
       }
+    }),
+  );
+brc
+  .command('addresses')
+  .description("the addresses this account can take BSV in at: its pay address and the bWalletX app's receive addresses")
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const { isPaired } = await import('./paired.js');
+      const n = o.account ?? readConfig().defaultAccount ?? Object.keys(readConfig().accounts)[0];
+      if (!n) throw new Error('No accounts yet.');
+      if (isPaired(n)) throw new Error(`"${n}" is paired: its keys stay on the phone.`);
+      const keys = await act.unlock(n);
+      const { appAddresses } = await import('./brc100.js');
+      const { PrivateKey } = await import('@bsv/sdk');
+      const rows = [{ label: 'pay address', address: PrivateKey.fromWif(keys.payPk).toAddress() }, ...appAddresses(keys.identityPk, 5).map(({ label, address }) => ({ label, address }))];
+      print(rows, () => rows.map((r) => `${r.address}  ${r.label}`).join('\n'));
     }),
   );
 brc
