@@ -297,7 +297,7 @@ program
   );
 
 // BRC-100 mode: the agent account as a full BRC-100 wallet, for sites and scripts (standalone accounts).
-const brc100Account = async (name?: string) => {
+const brc100Account = async (name?: string, local = false) => {
   const { isPaired } = await import('./paired.js');
   const n = name ?? readConfig().defaultAccount ?? Object.keys(readConfig().accounts)[0];
   if (!n) throw new Error('No accounts yet. Run `bwalletx key import <file>`.');
@@ -305,7 +305,7 @@ const brc100Account = async (name?: string) => {
   resolveAccount(n);
   const keys = await act.unlock(n);
   const b = await import('./brc100.js');
-  return { name: n, keys, b, w: await b.openWallet(n, keys) };
+  return { name: n, keys, b, w: local ? await b.openWallet(n, keys) : await b.openSharedWallet(keys) };
 };
 
 const brc = program.command('brc100').description('the agent account as a BRC-100 wallet (standalone accounts): fund, balance, withdraw');
@@ -323,6 +323,24 @@ brc
         print(r, () => (r.moved || failed.length ? `Moved ${r.moved} coins (${r.sats} sats) into ${name}'s BRC-100 wallet.${failed.map((f) => `\n  ${f.outpoint}: ${f.error}`).join('')}` : `Nothing to move: no BSV at ${w.payAddress} or the app's receive addresses.`));
       } finally {
         await w.close();
+      }
+    }),
+  );
+brc
+  .command('migrate')
+  .description("move the balance of the CLI's old private wallet (0.3.0–0.3.3) into the shared wallet the app uses")
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const { name, keys, b, w: shared } = await brc100Account(o.account);
+      const local = await b.openWallet(name, keys);
+      try {
+        const r = await b.migrateLocalToShared(local, shared, (detail) => appendLog(name, { at: Date.now(), action: 'brc100-migrate-note', detail, usd: 0 }));
+        if (r.sats) appendLog(name, { at: Date.now(), action: 'brc100-migrate', detail: `Moved ${r.sats} sats from the CLI wallet into the shared wallet ${r.txid ?? ''}`, usd: 0 });
+        print(r, () => (r.sats ? `Moved ${r.sats.toLocaleString()} sats into the shared wallet: ${r.txid}` : 'Nothing to move: the old CLI wallet is empty.'));
+      } finally {
+        await local.close();
+        await shared.close();
       }
     }),
   );

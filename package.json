@@ -1,6 +1,6 @@
 {
   "name": "bwalletx",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "bWalletX CLI and MCP server: run bWalletX agent accounts from the command line",
   "type": "module",
   "license": "MIT",

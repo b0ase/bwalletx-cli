@@ -44,7 +44,39 @@ export type AgentWallet = {
   close: () => Promise<void>;
 };
 
-/** Open (creating on first use) the agent account's BRC-100 wallet. Root key = the account's pay key. */
+/** The storage the bWalletX app syncs every account to (1Sat Storage). */
+export const SHARED_STORAGE_URL = 'https://wallet.1sat.app';
+
+/**
+ * The account's wallet exactly as the bWalletX app sees it: rooted on the account's identity key, with
+ * 1Sat Storage as the active store. For the app and the CLI to share it safely, the account's active
+ * storage in the app must be that remote too (Settings › Wallet Backup), not the phone's local store.
+ * No local monitor: with a remote active store the storage server broadcasts and tracks proofs.
+ */
+export async function openSharedWallet(keys: AgentKeys, url = SHARED_STORAGE_URL): Promise<AgentWallet> {
+  const rootKey = PrivateKey.fromWif(keys.identityPk);
+  const keyDeriver = new CachedKeyDeriver(rootKey);
+  const storage = new WalletStorageManager(keyDeriver.identityKey);
+  const services = new Services('main');
+  const wallet = new toolbox.Wallet({ chain: 'main', keyDeriver: keyDeriver as never, storage, services });
+  await storage.addWalletStorageProvider(new toolbox.StorageClient(wallet, url));
+  await storage.makeAvailable();
+  return {
+    wallet,
+    identityKey: keyDeriver.identityKey,
+    payAddress: PrivateKey.fromWif(keys.payPk).toAddress(),
+    sendWaiting: async () => undefined,
+    startMonitor: () => undefined,
+    close: async () => {
+      await wallet.destroy().catch(() => undefined);
+    },
+  };
+}
+
+/**
+ * The CLI's original private wallet (0.3.0–0.3.3): rooted on the pay key, local SQLite. Kept so its
+ * balance can be moved into the shared wallet with `brc100 migrate`.
+ */
 export async function openWallet(account: string, keys: AgentKeys): Promise<AgentWallet> {
   const dir = join(home(), 'brc100');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -143,6 +175,39 @@ export async function fundFromPayAddress(w: AgentWallet, keys: AgentKeys) {
 export async function walletBalance(w: AgentWallet) {
   const r = await w.wallet.listOutputs({ basket: 'default', limit: 10_000 }, 'bwalletx-cli');
   return r.outputs.filter((o) => o.spendable).reduce((n, o) => n + o.satoshis, 0);
+}
+
+/**
+ * Move everything in the old local wallet into the shared one, as a BRC-29 payment the shared wallet
+ * internalizes (so it lands in its default basket, spendable by the app and the CLI alike).
+ */
+export async function migrateLocalToShared(local: AgentWallet, shared: AgentWallet, note: (detail: string) => void = () => undefined) {
+  const have = await walletBalance(local);
+  const sats = have - 300; // leave the network fee
+  if (sats < FUND_MIN) return { sats: 0, txid: null as string | null };
+  const derivationPrefix = sdk.Utils.toBase64(sdk.Random(8));
+  const derivationSuffix = sdk.Utils.toBase64(sdk.Random(8));
+  const { publicKey } = await shared.wallet.getPublicKey(
+    { protocolID: [2, '3241645161d8'], keyID: `${derivationPrefix} ${derivationSuffix}`, counterparty: local.identityKey },
+    'bwalletx-cli',
+  );
+  const lockingScript = new sdk.P2PKH().lock(sdk.PublicKey.fromString(publicKey).toAddress()).toHex();
+  // Recorded before broadcasting: if internalizing fails, these recover the payment.
+  note(`migrate remittance: prefix ${derivationPrefix} suffix ${derivationSuffix} sender ${local.identityKey} to ${shared.identityKey}`);
+  const r = await local.wallet.createAction(
+    { description: 'bwalletx: move into the shared wallet', outputs: [{ lockingScript, satoshis: sats, outputDescription: 'to the shared wallet' }], options: { acceptDelayedBroadcast: false, randomizeOutputs: false } },
+    'bwalletx-cli',
+  );
+  if (!r.tx) throw new Error('The local wallet returned no transaction');
+  await shared.wallet.internalizeAction(
+    {
+      tx: r.tx,
+      description: 'bwalletx: moved in from the CLI wallet',
+      outputs: [{ outputIndex: 0, protocol: 'wallet payment', paymentRemittance: { derivationPrefix, derivationSuffix, senderIdentityKey: local.identityKey } }],
+    },
+    'bwalletx-cli',
+  );
+  return { sats, txid: r.txid ?? null };
 }
 
 /**
