@@ -42,9 +42,23 @@ program
   .action(
     run(async (o: { account: string }) => {
       if (!asJson) await banner();
-      const p = await login(o.account);
+      const p = await login(o.account, {});
       console.log(`\nPaired "${p.name}" with ${p.account}: ${p.scopes.join(', ')} until ${new Date(p.expiresAt).toLocaleDateString()}.`);
       console.log('Keep bWalletX open on that account while the CLI works. Try: bwalletx balance --account ' + p.name);
+    }),
+  );
+
+program
+  .command('pair')
+  .description('pair bWalletX on your phone as your MAIN wallet: `serve --wallet paired` forwards BRC-100 calls to it')
+  .requiredOption('--main', 'pair the main wallet (one wallet: the phone holds the keys and approves)')
+  .option('-a, --account <name>', 'local name for this pairing', 'main')
+  .action(
+    run(async (o: { account: string }) => {
+      if (!asJson) await banner();
+      const p = await login(o.account, { mode: 'brc100' });
+      console.log(`\nPaired "${p.name}" with ${p.account} as your main wallet until ${new Date(p.expiresAt).toLocaleDateString()}.`);
+      console.log(`Serve it to sites: bwalletx serve --wallet paired --account ${p.name} --origin <site>. Revoke: bwalletx logout --account ${p.name}`);
     }),
   );
 
@@ -419,12 +433,33 @@ program
   .command('serve')
   .description('serve the agent account as a BRC-100 wallet on http://localhost:3321 for the sites you allow')
   .option('-a, --account <name>', 'agent account')
-  .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
+  .option('--wallet <kind>', 'local (the CLI wallet), shared (1Sat Storage) or paired (forward to your phone: `bwalletx pair --main`)')
+  .option('--shared', 'alias for --wallet shared')
   .requiredOption('-o, --origin <host...>', 'sites allowed to use the wallet, e.g. www.tokenblaster.lol localhost:3000')
   .option('-p, --port <n>', 'port', '3321')
   .action(
-    run(async (o: { account?: string; origin: string[]; port: string; shared?: boolean }) => {
-      const { name, b, w } = await brc100Account(o.account, o.shared);
+    run(async (o: { account?: string; origin: string[]; port: string; shared?: boolean; wallet?: string }) => {
+      const kind = o.wallet ?? (o.shared ? 'shared' : 'local');
+      if (!['local', 'shared', 'paired'].includes(kind)) throw new Error(`--wallet must be local, shared or paired (got "${kind}")`);
+      if (o.shared && kind !== 'shared') throw new Error('--shared conflicts with --wallet ' + kind);
+      const log = (l: string) => console.log(`${new Date().toLocaleTimeString()}  ${l}`);
+      if (kind === 'paired') {
+        const { readPairing } = await import('./paired.js');
+        const n = o.account ?? 'main';
+        const p = readPairing(n);
+        if (!p) throw new Error(`"${n}" isn't paired. Run \`bwalletx pair --main --account ${n}\` first.`);
+        if (p.mode !== 'brc100') throw new Error(`"${n}" is an agent pairing, not a main-wallet one. Run \`bwalletx pair --main\`.`);
+        const b = await import('./brc100.js');
+        const w = await b.pairedBackend(n);
+        await b.serve(w, { account: n, origins: o.origin, port: Number(o.port), onEvent: log });
+        console.log(`Your paired bWalletX (${p.account}) is a BRC-100 wallet on http://localhost:${o.port}`);
+        console.log(`  allowed: ${o.origin.join(', ')}`);
+        console.log('  keys stay on the phone: keep bWalletX open and unlocked; it approves every spend. No local fallback. Ctrl-C to stop.');
+        await new Promise<void>((resolve) => process.once('SIGINT', () => resolve()));
+        await w.close();
+        return;
+      }
+      const { name, b, w } = await brc100Account(o.account, kind === 'shared');
       w.startMonitor();
       const sats = await b.walletBalance(w).catch(() => 0);
       await b.serve(w, { account: name, origins: o.origin, port: Number(o.port), onEvent: (l) => console.log(`${new Date().toLocaleTimeString()}  ${l}`) });

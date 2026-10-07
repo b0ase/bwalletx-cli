@@ -47,7 +47,13 @@ export type Pairing = {
   pairedAt: number;
   /** Set when the pairing includes "Mint NFTs": the limits chosen on the phone. */
   mint?: MintInfo | null;
+  /** 'brc100': a "main wallet" pairing (`bwalletx pair --main`) that `serve --wallet paired` forwards BRC-100 calls over. */
+  mode?: 'agent' | 'brc100';
+  /** The limits the phone set for a brc100 pairing (informational: the phone enforces them). */
+  caps?: Brc100Caps | null;
 };
+export type Brc100Caps = { dailyUsd?: number; perCallUsd?: number; origins?: string[] };
+export type LoginOptions = { mode?: 'agent' | 'brc100' };
 export type MintInfo = { maxItems: number; maxUsd: number; itemsUsed: number; spentUsd: number; itemsLeft: number; usdLeft: number };
 
 const file = (name: string) => join(home(), 'paired', `${name}.json`);
@@ -58,18 +64,18 @@ export const isPaired = (name: string) => existsSync(file(name));
 const open = (url: string) => new WebSocket(url, { headers: { Origin: CLI_ORIGIN }, handshakeTimeout: 10_000 });
 
 /** `bwalletx login`: show a QR, wait for the phone, save the pairing as account `name`. */
-export async function login(name: string, out: (s: string) => void = console.log): Promise<Pairing> {
+export async function login(name: string, opts: LoginOptions = {}, out: (s: string) => void = console.log): Promise<Pairing> {
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(name) || name.startsWith('.')) throw new Error(`Bad account name "${name}"`);
   const deadline = Date.now() + 5 * 60_000;
   while (Date.now() < deadline) {
-    const r = await round(name, out);
+    const r = await round(name, opts.mode ?? 'agent', out);
     if (r) return r;
     out('\nThe code expired; here is a new one.\n');
   }
   throw new Error('Pairing timed out. Run `bwalletx login` again.');
 }
 
-function round(name: string, out: (s: string) => void): Promise<Pairing | null> {
+function round(name: string, mode: 'agent' | 'brc100', out: (s: string) => void): Promise<Pairing | null> {
   const S = PrivateKey.fromRandom();
   const c = newChannel();
   const e = Math.floor(Date.now() / 1000) + QR_LIFETIME_S;
@@ -82,7 +88,13 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
     const timer = setTimeout(() => !sealer && (ws.close(), resolve(null)), QR_LIFETIME_S * 1000 - 5000);
     ws.on('open', async () => {
       out(brandQr(await QRCode.toString(link, { type: 'terminal', small: true })));
-      out(yellow('In bWalletX: open the account to use (an AGENT account, or any account for minting only), then Settings › Paired websites › Scan to connect'));
+      out(
+        yellow(
+          mode === 'brc100'
+            ? 'In bWalletX: open your MAIN account, then Settings › Paired websites › Scan to connect (choose caps, sites and expiry)'
+            : 'In bWalletX: open the account to use (an AGENT account, or any account for minting only), then Settings › Paired websites › Scan to connect',
+        ),
+      );
       out(`Or open this link on the phone:\n${link}\n`);
     });
     ws.on('error', (err) => !sealer && (clearTimeout(timer), reject(new Error(`Pairing service unreachable: ${err.message}`))));
@@ -101,10 +113,11 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
       if (!msg) return;
       if (msg.t === 'ready') {
         infoId = `info-${Date.now()}`;
-        ws.send(JSON.stringify(await sealer.seal({ t: 'req', id: infoId, action: 'info', params: {} })));
+        ws.send(JSON.stringify(await sealer.seal({ t: 'req', id: infoId, action: 'info', params: mode === 'brc100' ? { mode } : {} })));
       } else if (msg.t === 'res' && msg.id === infoId) {
         if (msg.error) return (ws.close(), reject(new Error(msg.error.message)));
-        const i = msg.result as { account: string; identityAddress: string; scopes: string[]; expiresAt: number; mint?: MintInfo | null };
+        const i = msg.result as { account: string; identityAddress: string; scopes: string[]; expiresAt: number; mint?: MintInfo | null; caps?: Brc100Caps | null; mode?: string };
+        if (mode === 'brc100' && i.mode !== 'brc100') return (ws.close(), reject(new Error('This bWalletX version does not support main-wallet pairing yet (no brc100 mode in its answer).')));
         const p: Pairing = {
           format: 'bwalletx.pairing/1',
           name,
@@ -119,6 +132,8 @@ function round(name: string, out: (s: string) => void): Promise<Pairing | null> 
           expiresAt: i.expiresAt,
           pairedAt: Date.now(),
           mint: i.mint ?? null,
+          mode,
+          ...(mode === 'brc100' && { caps: i.caps ?? null }),
         };
         savePairing(p);
         const cfg = readConfig();
@@ -169,6 +184,10 @@ export class PhoneSession {
     return s;
   }
 
+  get isOpen() {
+    return !this.closed && this.ws.readyState === WebSocket.OPEN;
+  }
+
   get pairing() {
     return this.p;
   }
@@ -188,7 +207,7 @@ export class PhoneSession {
       this.ws.once('error', (e) => reject(new Error(`Pairing service unreachable: ${e.message}`)));
     });
     this.ws.on('message', (raw) => void this.onFrame(String(raw)));
-    this.ws.on('close', () => this.failAll(new Error('Connection to the pairing service closed.')));
+    this.ws.on('close', () => ((this.closed = true), this.failAll(new Error('Connection to the pairing service closed.'))));
   }
 
   private persist() {
@@ -246,13 +265,32 @@ export class PhoneSession {
 }
 
 /** One request to the phone. The app must be open (and unlocked) on the paired account. */
-export async function callPhone<T = unknown>(name: string, action: string, params: unknown = {}): Promise<T> {
+export async function callPhone<T = unknown>(name: string, action: string, params: unknown = {}, timeoutMs = CALL_TIMEOUT_MS): Promise<T> {
   const s = await PhoneSession.open(name);
   try {
-    return await s.call<T>(action, params);
+    return await s.call<T>(action, params, timeoutMs);
   } finally {
     s.close();
   }
+}
+
+export { CALL_TIMEOUT_MS };
+
+/**
+ * One BRC-100 call forwarded to the paired main wallet, inside the usual {action, params} envelope.
+ * The phone checks the grant, origin, method and caps, prompts as needed, and signs/broadcasts itself.
+ * Pass `session` to reuse one connection (serve does: concurrent sessions would reuse counters).
+ */
+export async function callBrc100<T = unknown>(
+  name: string,
+  method: string,
+  args: unknown,
+  site: string,
+  o: { session?: PhoneSession; timeoutMs?: number } = {},
+): Promise<T> {
+  const params = { method, args, site };
+  if (o.session) return o.session.call<T>('brc100', params, o.timeoutMs ?? CALL_TIMEOUT_MS);
+  return callPhone<T>(name, 'brc100', params, o.timeoutMs ?? CALL_TIMEOUT_MS);
 }
 
 /** Forget a pairing here (and tell the phone, best effort). */

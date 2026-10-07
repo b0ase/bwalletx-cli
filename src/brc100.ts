@@ -286,13 +286,83 @@ const hostOf = (origin: string) => {
 /** A wallet error the SDK client turns back into a proper error with our message (code 6). */
 const refusal = (message: string) => ({ isError: true, code: 6, parameter: 'bwalletx', message });
 
-export type ServeOptions = { account: string; origins: string[]; port?: number; onEvent?: (line: string) => void };
+/**
+ * The wallet behind `serve`: the CLI's own (local or shared storage) or the owner's paired bWalletX.
+ * `paired` backends sign and broadcast on the phone, so serve doesn't relay to ARC for them and only
+ * forwards the calls in PAIRED_FORWARD.
+ */
+export type ServeWallet = {
+  paired: boolean;
+  call: (method: string, args: unknown, site: string) => Promise<unknown>;
+  close: () => Promise<void>;
+};
 
-/** Serve the agent wallet over the BRC-100 HTTP JSON substrate. Resolves once listening. */
-export async function serve(w: AgentWallet, o: ServeOptions) {
+export const localBackend = (w: AgentWallet): ServeWallet => {
+  const api = w.wallet as unknown as Record<string, (args: unknown, originator?: string) => Promise<unknown>>;
+  return { paired: false, call: (m, args, site) => api[m](args, site), close: () => w.close() };
+};
+
+/** Phase 1 (read-only) and phase 2 (createAction/signAction: the phone prompts every time). */
+export const PAIRED_FORWARD = new Set(['getPublicKey', 'listOutputs', 'isAuthenticated', 'waitForAuthentication', 'getNetwork', 'getHeight', 'getVersion', 'createAction', 'signAction']);
+/** Never leave the machine, whatever the mode. */
+export const NEVER_FORWARD = new Set(['revealCounterpartyKeyLinkage', 'revealSpecificKeyLinkage']);
+
+export class WalletUnreachable extends Error {
+  name = 'WalletUnreachable';
+}
+
+/**
+ * Forward to the paired main wallet over the pairing relay. One connection, reopened when it drops.
+ * No fallback to a local wallet: a timeout or a dead relay is a "wallet unreachable" error.
+ */
+export async function pairedBackend(name: string, o: { timeoutMs?: number } = {}): Promise<ServeWallet> {
+  const { PhoneSession, callBrc100 } = await import('./paired.js');
+  let session: import('./paired.js').PhoneSession | null = null;
+  let queue: Promise<unknown> = Promise.resolve();
+  const one = async (method: string, args: unknown, site: string) => {
+    try {
+      if (!session?.isOpen) session = await PhoneSession.open(name);
+    } catch (e) {
+      throw new WalletUnreachable(`wallet unreachable: ${(e as Error).message}`);
+    }
+    try {
+      return await callBrc100(name, method, args, site, { session, timeoutMs: o.timeoutMs });
+    } catch (e) {
+      const err = e as Error & { code?: string };
+      if (err.code) throw err; // the phone answered (refused, cap, user said no)
+      throw new WalletUnreachable(`wallet unreachable: ${err.message}`);
+    }
+  };
+  return {
+    paired: true,
+    // Serialised: one sealed request at a time keeps the counters and the relay's rate limit happy.
+    call: (method, args, site) => {
+      const r = queue.then(() => one(method, args, site));
+      queue = r.catch(() => undefined);
+      return r;
+    },
+    close: async () => session?.close(),
+  };
+}
+
+export type ServeOptions = {
+  account: string;
+  origins: string[];
+  port?: number;
+  onEvent?: (line: string) => void;
+  /** For tests: what is called to hand a signed tx to ARC (local mode only). */
+  arc?: (result: unknown) => Promise<void>;
+  /** For tests: BSV price instead of fetching it. */
+  usdPerBsv?: () => Promise<number>;
+};
+
+/** Serve a wallet over the BRC-100 HTTP JSON substrate. Resolves once listening. */
+export async function serve(input: AgentWallet | ServeWallet, o: ServeOptions) {
+  const w: ServeWallet = 'call' in input ? input : localBackend(input);
   const allowed = new Set(o.origins.map(hostOf));
   const say = o.onEvent ?? (() => undefined);
-  const api = w.wallet as unknown as Record<string, (args: unknown, originator?: string) => Promise<unknown>>;
+  const arc = o.arc ?? relayToArc;
+  const price = o.usdPerBsv ?? bsvUsd;
 
   const send = (res: ServerResponse, status: number, body: unknown, origin?: string) => {
     res.writeHead(status, {
@@ -323,7 +393,7 @@ export async function serve(w: AgentWallet, o: ServeOptions) {
       return send(res, 403, refusal(`bwalletx serve: ${host || 'this origin'} is not allowed (start with --origin ${host || '<site>'})`));
     }
     const call = (req.url ?? '').replace(/^\/+/, '').split('?')[0];
-    if (req.method !== 'POST' || !ALLOWED.has(call)) return send(res, 400, refusal(`bwalletx serve: ${call || 'this call'} is not offered`), origin);
+    if (req.method !== 'POST' || !ALLOWED.has(call) || NEVER_FORWARD.has(call) || (w.paired && !PAIRED_FORWARD.has(call))) return send(res, 400, refusal(`bwalletx serve: ${call || 'this call'} is not offered`), origin);
 
     const chunks: Buffer[] = [];
     let size = 0;
@@ -332,12 +402,21 @@ export async function serve(w: AgentWallet, o: ServeOptions) {
       if (size > 64 * 1024 * 1024) return send(res, 413, refusal('Request too large'), origin);
       chunks.push(c as Buffer);
     }
-    const args = normalizeBRC100WalletByteFields(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) as Record<string, unknown>;
+    let args: Record<string, unknown>;
+    try {
+      args = normalizeBRC100WalletByteFields(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) as Record<string, unknown>;
+    } catch {
+      return send(res, 400, refusal('bwalletx serve: bad JSON'), origin);
+    }
+    if (w.paired && args && typeof args === 'object' && args.privileged === true) {
+      say(`refused ${host} ${call}: privileged calls are never forwarded`);
+      return send(res, 400, refusal('bwalletx serve: privileged calls are not offered'), origin);
+    }
 
     if (call === 'createAction') {
       const a = args as unknown as CreateActionArgs;
       const sats = outgoingSats(a);
-      const usd = sats ? (sats / 1e8) * (await bsvUsd()) : 0;
+      const usd = sats ? (sats / 1e8) * (await price()) : 0;
       const g = gateAction(o.account, { kind: 'send', token: 'BSV', usd, to: host });
       if (!g.ok) {
         say(`REFUSED ${host} createAction (${sats} sats): ${g.reason}`);
@@ -347,13 +426,14 @@ export async function serve(w: AgentWallet, o: ServeOptions) {
     }
 
     try {
-      const out = await api[call](args, host);
-      if (call === 'createAction' || call === 'signAction') relayToArc(out).catch(() => undefined);
+      const out = await w.call(call, args, host);
+      // The phone broadcasts what it signs; only the CLI's own wallet needs the ARC nudge.
+      if (!w.paired && (call === 'createAction' || call === 'signAction')) arc(out).catch(() => undefined);
       if (LOGGED.has(call)) {
         const a = args as { description?: string };
         const r = out as { txid?: string };
         const sats = call === 'createAction' ? outgoingSats(args as unknown as CreateActionArgs) : 0;
-        const usd = sats ? (sats / 1e8) * (await bsvUsd().catch(() => 0)) : 0;
+        const usd = sats ? (sats / 1e8) * (await price().catch(() => 0)) : 0;
         appendLog(o.account, {
           at: Date.now(),
           action: call === 'createAction' ? (sats ? 'send' : 'sign') : `brc100-${call}`,
@@ -366,6 +446,7 @@ export async function serve(w: AgentWallet, o: ServeOptions) {
     } catch (e) {
       const err = e as { code?: number; message?: string; name?: string } & Record<string, unknown>;
       say(`${host} ${call} failed: ${err.message ?? String(e)}`);
+      if (err.name === 'WalletUnreachable') return send(res, 503, refusal(`bWalletX: ${err.message}`), origin);
       if (err.name === 'WERR_INSUFFICIENT_FUNDS') return send(res, 400, { isError: true, code: 7, totalSatoshisNeeded: err.totalSatoshisNeeded, moreSatoshisNeeded: err.moreSatoshisNeeded }, origin);
       send(res, 400, refusal(err.message ?? String(e)), origin);
     }
