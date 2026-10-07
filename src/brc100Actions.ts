@@ -66,6 +66,7 @@ export async function withdrawFrom(
   w: WithdrawWallet,
   o: { amount: number | 'all'; address: string; have: number; rate: number; relay?: (r: unknown) => Promise<unknown> },
 ) {
+  if (o.amount !== 'all' && !(Number.isFinite(o.amount) && o.amount > 0)) throw new Error('Give an amount in dollars, e.g. 5, or "all".');
   const sats = o.amount === 'all' ? o.have - 300 : Math.round((o.amount / o.rate) * 1e8);
   if (!(sats > 0) || sats > o.have) throw new Error(`Can't send ${sats} sats: the wallet holds ${o.have}`);
   const usd = (sats / 1e8) * o.rate;
