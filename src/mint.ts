@@ -241,3 +241,20 @@ export function readManifest(path: string): Item[] {
     return { title: x.title, file: resolve(dir, x.file), ...(typeof x.sha256 === 'string' && { sha256: x.sha256 }) };
   });
 }
+
+/** --collection / --collection-id → a CollectionChoice (shared by the CLI and MCP). */
+export const collectionOf = (o: { collection?: string; collectionId?: string }): CollectionChoice => {
+  if (o.collection && o.collectionId) throw new Error('Use --collection (new) or --collection-id (existing), not both');
+  if (o.collectionId) {
+    if (!/^[0-9a-f]{64}_\d+$/.test(o.collectionId)) throw new Error('--collection-id must be <txid>_<vout>');
+    return { kind: 'existing', id: o.collectionId };
+  }
+  return o.collection ? { kind: 'new', name: o.collection } : { kind: 'none' };
+};
+
+/** Files + --title / --title-from-filename → mint items (shared by the CLI and MCP). */
+export function itemsFor(files: string[], o: { title?: string; titleFromFilename?: boolean }): Item[] {
+  if (o.title && files.length > 1) throw new Error('--title is for one file; use --title-from-filename for several');
+  if (!o.title && !o.titleFromFilename) throw new Error('Give --title, or --title-from-filename');
+  return files.map((f) => ({ file: f, title: o.title ?? titleFromFilename(f) }));
+}

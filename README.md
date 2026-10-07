@@ -170,8 +170,32 @@ a synthetic funding coin, without touching your account or broadcasting.
 
 ## MCP
 
-Tools: `accounts`, `balance`, `price`, `send`, `buy`, `strategy_show`, `strategy_load` (always loads in
-paper mode; going live is a human step), `log`, `stop_all`. Spending tools use the gate above.
+Tools (reads are free; anything that spends passes the gate above, paper mode never signs, live key-file
+accounts need `BWALLETX_PASSPHRASE` in the MCP env, paired accounts sign on the phone):
+
+| Tool | What it does |
+|------|--------------|
+| `accounts` | list accounts and loaded strategies |
+| `balance` | BSV and BSV-21 balances in USD |
+| `price` | floor price of a BSV-21 token |
+| `send` | send BSV worth `usd` (gated) |
+| `buy` | buy a BSV-21 token for at most `maxUsd` (gated) |
+| `strategy_show` | the loaded strategy, mode and paper book |
+| `strategy_load` | load a strategy file, always in **paper** mode |
+| `log` | recent activity log entries |
+| `stop_all` | kill switch: refuse every spending action |
+| `brc100_balance` | BRC-100 wallet balance (`wallet`: `local` or `shared`) |
+| `brc100_addresses` | pay address + app receive addresses (key-file accounts only) |
+| `brc100_fund` | move the account's own pay/receive BSV into its own BRC-100 wallet (no money leaves; logged; refused while stopped) |
+| `brc100_withdraw` | send `usd` (or `"all"`) from the BRC-100 wallet to an address (gated like `send`; paper refuses; logged; ARC relay) |
+| `mint`, `mint_manifest` | mint files / a manifest as NFTs on a paired phone (the phone signs within its pairing's mint limits; refused while stopped; `dryRun` estimates only) |
+| `pairing_status` | whether an account is paired and how (agent or brc100 main wallet), scopes, expiry, limits; never secrets |
+| `serve_status` | whether something listens on the `serve` port (3321) |
+
+**Human-only, never exposed over MCP:** `cap` changes, `resume`, `strategy load --live`, `key import`,
+`pair` / `login` / `logout`, `brc100 migrate`, and starting/stopping `serve`. They loosen safety settings, change
+trust or key material, or need a person at the terminal or phone. An agent can stop things (`stop_all`) but
+never turn them back on or raise its own limits.
 
 **Claude Code**
 

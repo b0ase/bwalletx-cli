@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { Command } from 'commander';
 import * as act from './actions.js';
 import * as mint from './mint.js';
+import * as b1 from './brc100Actions.js';
 import { login, unpair } from './paired.js';
 import { agentRun } from './agent.js';
 import { confirm } from './passphrase.js';
@@ -196,14 +197,7 @@ const printSummary = (r: mint.Summary) =>
     ].join('\n');
   });
 
-const collectionOf = (o: { collection?: string; collectionId?: string }): mint.CollectionChoice => {
-  if (o.collection && o.collectionId) throw new Error('Use --collection (new) or --collection-id (existing), not both');
-  if (o.collectionId) {
-    if (!/^[0-9a-f]{64}_\d+$/.test(o.collectionId)) throw new Error('--collection-id must be <txid>_<vout>');
-    return { kind: 'existing', id: o.collectionId };
-  }
-  return o.collection ? { kind: 'new', name: o.collection } : { kind: 'none' };
-};
+const collectionOf = mint.collectionOf;
 
 program
   .command('mint <files...>')
@@ -217,9 +211,7 @@ program
   .option('--dry-run', 'print sizes and the cost estimate only; nothing is sent')
   .action(
     run(async (files: string[], o: { account?: string; collection?: string; collectionId?: string; title?: string; titleFromFilename?: boolean; description?: string; dryRun?: boolean }) => {
-      if (o.title && files.length > 1) throw new Error('--title is for one file; use --title-from-filename for several');
-      if (!o.title && !o.titleFromFilename) throw new Error('Give --title, or --title-from-filename');
-      const items = files.map((f) => ({ file: f, title: o.title ?? mint.titleFromFilename(f) }));
+      const items = mint.itemsFor(files, o);
       printSummary(await mint.runMint(items, { account: o.account, collection: collectionOf(o), description: o.description, dryRun: o.dryRun, out: asJson ? () => {} : console.log }));
     }),
   );
@@ -311,18 +303,7 @@ program
   );
 
 // BRC-100 mode: the agent account as a full BRC-100 wallet, for sites and scripts (standalone accounts).
-const brc100Account = async (name?: string, shared = false) => {
-  const { isPaired } = await import('./paired.js');
-  const n = name ?? readConfig().defaultAccount ?? Object.keys(readConfig().accounts)[0];
-  if (!n) throw new Error('No accounts yet. Run `bwalletx key import <file>`.');
-  if (isPaired(n)) throw new Error(`"${n}" is paired: its keys stay on the phone, so it can't run as a BRC-100 wallet here. Import an agent key file for this.`);
-  resolveAccount(n);
-  const keys = await act.unlock(n);
-  const b = await import('./brc100.js');
-  // Default: the CLI's own wallet. --shared opens the account's 1Sat Storage wallet, which only stays in step
-  // with the app if the app uses that remote as the account's active storage (it normally doesn't).
-  return { name: n, keys, b, w: shared ? await b.openSharedWallet(keys) : await b.openWallet(n, keys) };
-};
+const brc100Account = b1.brc100Account;
 
 const brc = program.command('brc100').description('the agent account as a BRC-100 wallet (standalone accounts): fund, balance, withdraw');
 brc
@@ -332,15 +313,9 @@ brc
   .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .action(
     run(async (o: { account?: string; shared?: boolean }) => {
-      const { name, keys, b, w } = await brc100Account(o.account, o.shared);
-      try {
-        const r = await b.fundFromPayAddress(w, keys);
-        appendLog(name, { at: Date.now(), action: 'brc100-fund', detail: `Moved ${r.moved} coins (${r.sats} sats) into the BRC-100 wallet`, usd: 0 });
-        const failed = r.results.filter((x) => !x.success);
-        print(r, () => (r.moved || failed.length ? `Moved ${r.moved} coins (${r.sats} sats) into ${name}'s BRC-100 wallet.${failed.map((f) => `\n  ${f.outpoint}: ${f.error}`).join('')}` : `Nothing to move: no BSV at ${w.payAddress} or the app's receive addresses.`));
-      } finally {
-        await w.close();
-      }
+      const { name, payAddress, result: r } = await b1.brc100Fund(o.account, o.shared);
+      const failed = r.results.filter((x) => !x.success);
+      print(r, () => (r.moved || failed.length ? `Moved ${r.moved} coins (${r.sats} sats) into ${name}'s BRC-100 wallet.${failed.map((f) => `\n  ${f.outpoint}: ${f.error}`).join('')}` : `Nothing to move: no BSV at ${payAddress} or the app's receive addresses.`));
     }),
   );
 brc
@@ -367,14 +342,7 @@ brc
   .option('-a, --account <name>', 'agent account')
   .action(
     run(async (o: { account?: string }) => {
-      const { isPaired } = await import('./paired.js');
-      const n = o.account ?? readConfig().defaultAccount ?? Object.keys(readConfig().accounts)[0];
-      if (!n) throw new Error('No accounts yet.');
-      if (isPaired(n)) throw new Error(`"${n}" is paired: its keys stay on the phone.`);
-      const keys = await act.unlock(n);
-      const { appAddresses } = await import('./brc100.js');
-      const { PrivateKey } = await import('@bsv/sdk');
-      const rows = [{ label: 'pay address', address: PrivateKey.fromWif(keys.payPk).toAddress() }, ...appAddresses(keys.identityPk, 5).map(({ label, address }) => ({ label, address }))];
+      const rows = await b1.brc100Addresses(o.account);
       print(rows, () => rows.map((r) => `${r.address}  ${r.label}`).join('\n'));
     }),
   );
@@ -385,15 +353,8 @@ brc
   .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .action(
     run(async (o: { account?: string; shared?: boolean }) => {
-      const { name, b, w } = await brc100Account(o.account, o.shared);
-      try {
-        const sats = await b.walletBalance(w);
-        const { bsvUsd } = await import('./market.js');
-        const rate = await bsvUsd();
-        print({ account: name, identityKey: w.identityKey, sats, usd: (sats / 1e8) * rate }, () => `${name}: ${sats.toLocaleString()} sats (${usd((sats / 1e8) * rate)})\n  identity key ${w.identityKey}`);
-      } finally {
-        await w.close();
-      }
+      const r = await b1.brc100Balance(o.account, o.shared);
+      print(r, () => `${r.account}: ${r.sats.toLocaleString()} sats (${usd(r.usd)})\n  identity key ${r.identityKey}`);
     }),
   );
 brc
@@ -403,29 +364,8 @@ brc
   .option('--shared', "use the account's 1Sat Storage wallet (only if the app uses it as active storage)")
   .action(
     run(async (amount: string, address: string, o: { account?: string; shared?: boolean }) => {
-      const { name, b, w } = await brc100Account(o.account, o.shared);
-      try {
-        const { bsvUsd } = await import('./market.js');
-        const { gateAction } = await import('./gate.js');
-        const { P2PKH } = await import('@bsv/sdk');
-        const rate = await bsvUsd();
-        const have = await b.walletBalance(w);
-        const sats = amount === 'all' ? have - 300 : Math.round((Number(amount) / rate) * 1e8);
-        if (!(sats > 0) || sats > have) throw new Error(`Can't send ${sats} sats: the wallet holds ${have}`);
-        const g = gateAction(name, { kind: 'send', token: 'BSV', usd: (sats / 1e8) * rate, to: address });
-        if (!g.ok) throw new Error(`Refused: ${g.reason}`);
-        if (g.paper) throw new Error('Paper mode: nothing is signed');
-        const r = await w.wallet.createAction(
-          { description: 'bwalletx withdraw', outputs: [{ lockingScript: new P2PKH().lock(address).toHex(), satoshis: sats, outputDescription: 'withdraw' }], options: { acceptDelayedBroadcast: false } },
-          'bwalletx-cli',
-        );
-        await w.sendWaiting();
-        await b.relayToArc(r).catch(() => undefined);
-        appendLog(name, { at: Date.now(), action: 'send', detail: `BRC-100 withdraw ${sats} sats to ${address} ${r.txid ?? ''}`, usd: (sats / 1e8) * rate });
-        print({ txid: r.txid, sats }, () => `Sent ${sats.toLocaleString()} sats to ${address}: ${r.txid}`);
-      } finally {
-        await w.close();
-      }
+      const r = await b1.brc100Withdraw(amount === 'all' ? 'all' : Number(amount), address, o.account, o.shared);
+      print(r, () => `Sent ${r.sats.toLocaleString()} sats to ${address}: ${r.txid}`);
     }),
   );
 

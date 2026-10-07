@@ -1,9 +1,18 @@
-/** `bwalletx mcp`: stdio MCP server exposing the same operations, through the same gate. */
+/**
+ * `bwalletx mcp`: stdio MCP server exposing the same operations, through the same gate.
+ *
+ * Human-only (never exposed here, by design): `cap` changes, `resume`, `strategy load --live`, `key import`,
+ * `pair` / `login` / `logout`, `brc100 migrate`, and starting/stopping `serve`. These change safety settings,
+ * trust or key material, or need a person at the terminal/phone; an agent may stop things (`stop_all`) but
+ * never loosen them.
+ */
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as act from './actions.js';
-import { appendLog, getLoaded, readConfig, resolveAccount, setAllStopped } from './store.js';
+import * as b1 from './brc100Actions.js';
+import * as mint from './mint.js';
+import { allStopped, appendLog, getLoaded, readConfig, resolveAccount, setAllStopped } from './store.js';
 
 const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] });
 const wrap =
@@ -80,6 +89,87 @@ export async function runMcp(version: string) {
       for (const n of Object.keys(readConfig().accounts)) appendLog(n, { at: Date.now(), action: 'stop', detail: 'All agents stopped (MCP)', usd: 0 });
       return { stopped: true };
     }),
+  );
+
+  const wallet = z.enum(['local', 'shared']).optional().describe("local (default): the CLI's own BRC-100 wallet; shared: the account's 1Sat Storage wallet (only if the app uses it as active storage)");
+  const isShared = (w?: string) => w === 'shared';
+  server.registerTool(
+    'brc100_balance',
+    { description: "Spendable BSV in a key-file account's BRC-100 wallet (read-only). Needs BWALLETX_PASSPHRASE to open the wallet; paired accounts are refused (keys on the phone).", inputSchema: { account, wallet } },
+    wrap(({ account: a, wallet: w }: { account?: string; wallet?: 'local' | 'shared' }) => b1.brc100Balance(a, isShared(w))),
+  );
+  server.registerTool(
+    'brc100_addresses',
+    { description: "Addresses a key-file account takes BSV in at: its pay address and the bWalletX app's receive addresses (read-only). Refused for paired accounts.", inputSchema: { account } },
+    wrap(({ account: a }: { account?: string }) => b1.brc100Addresses(a)),
+  );
+  server.registerTool(
+    'brc100_fund',
+    {
+      description:
+        "Move the account's own plain BSV (pay address + app receive addresses) into its own BRC-100 wallet. No money leaves the account; logged as brc100-fund. Refused while all agents are stopped. Needs BWALLETX_PASSPHRASE.",
+      inputSchema: { account, wallet },
+    },
+    wrap(async ({ account: a, wallet: w }: { account?: string; wallet?: 'local' | 'shared' }) => {
+      if (allStopped()) return { ok: false, text: 'Refused: all agents are stopped (bwalletx resume)' };
+      const r = await b1.brc100Fund(a, isShared(w));
+      return { account: r.name, ...r.result };
+    }),
+  );
+  server.registerTool(
+    'brc100_withdraw',
+    {
+      description:
+        'Send BSV worth `usd` dollars ("all" for everything) from the BRC-100 wallet to an address. Gated like send: kill switch, daily cap, rate limit, strategy rules; paper mode refuses (nothing signed). Logged; relayed to ARC. Needs BWALLETX_PASSPHRASE.',
+      inputSchema: { usd: z.union([z.number().positive(), z.literal('all')]), address: z.string(), account, wallet },
+    },
+    wrap(({ usd, address, account: a, wallet: w }: { usd: number | 'all'; address: string; account?: string; wallet?: 'local' | 'shared' }) => b1.brc100Withdraw(usd, address, a, isShared(w))),
+  );
+  const mintOpts = {
+    account: z.string().optional().describe('Paired account (pairing scope "Mint NFTs")'),
+    collection: z.string().optional().describe('Create this collection with the first item and add the rest to it'),
+    collectionId: z.string().optional().describe('Add to an existing collection of yours (<txid>_<vout>)'),
+    description: z.string().optional().describe('Description for every item'),
+    dryRun: z.boolean().optional().describe('Sizes and cost estimate only; nothing is sent'),
+  };
+  type MintArgs = { account?: string; collection?: string; collectionId?: string; description?: string; dryRun?: boolean };
+  const mintGate = (o: MintArgs) => (!o.dryRun && allStopped() ? 'Refused: all agents are stopped (bwalletx resume)' : null);
+  server.registerTool(
+    'mint',
+    {
+      description:
+        'Mint files (paths on this machine) as NFTs on a paired phone, like `bwalletx mint`. The phone signs within the mint limits chosen when pairing (items and USD); refused while all agents are stopped. Key-file accounts cannot mint.',
+      inputSchema: { files: z.array(z.string()).min(1), title: z.string().optional().describe('Title (one file only)'), titleFromFilename: z.boolean().optional(), ...mintOpts },
+    },
+    wrap(async (o: MintArgs & { files: string[]; title?: string; titleFromFilename?: boolean }) => {
+      const refused = mintGate(o);
+      if (refused) return { ok: false, text: refused };
+      return mint.runMint(mint.itemsFor(o.files, o), { account: o.account, collection: mint.collectionOf(o), description: o.description, dryRun: o.dryRun, out: () => {} });
+    }),
+  );
+  server.registerTool(
+    'mint_manifest',
+    {
+      description: 'Mint every entry of a manifest file ([{ title, file, sha256? }]) in order on a paired phone, like `bwalletx mint-manifest`; resumable via <manifest>.progress.json. Same limits as mint.',
+      inputSchema: { manifest: z.string(), ...mintOpts },
+    },
+    wrap(async (o: MintArgs & { manifest: string }) => {
+      const refused = mintGate(o);
+      if (refused) return { ok: false, text: refused };
+      const progressPath = mint.progressPathFor(o.manifest);
+      const r = await mint.runMint(mint.readManifest(o.manifest), { account: o.account, collection: mint.collectionOf(o), description: o.description, dryRun: o.dryRun, progressPath, out: () => {} });
+      return o.dryRun ? r : { ...r, progressPath };
+    }),
+  );
+  server.registerTool(
+    'pairing_status',
+    { description: 'Whether an account is paired with a phone and in which mode (agent, or brc100 main wallet), with scopes, expiry and mint/caps limits (read-only, never secrets). Pairing itself is a human step (`bwalletx login` / `pair --main`).', inputSchema: { account } },
+    wrap(({ account: a }: { account?: string }) => b1.pairingStatus(a)),
+  );
+  server.registerTool(
+    'serve_status',
+    { description: 'Whether something is listening on the `bwalletx serve` BRC-100 port (default 3321) (read-only). Starting/stopping serve is a human step.', inputSchema: { port: z.number().int().positive().max(65535).optional() } },
+    wrap(({ port }: { port?: number }) => b1.serveStatus(port ?? 3321)),
   );
 
   await server.connect(new StdioServerTransport());
