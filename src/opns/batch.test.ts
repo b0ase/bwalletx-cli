@@ -76,16 +76,20 @@ describe('lists', () => {
     expect(r.invalid).toEqual(['bad_name']);
   });
   test('merged lists are deduped and sorted so prefixes come first', () => {
-    const q = buildQueue([['b0asex', 'zed'], ['b0ase', 'b0as', 'zed']]);
+    const q = buildQueue([['b0asex', 'zed', 'b0ase', 'b0as']]);
     expect(q.map((x) => x.name)).toEqual(['b0as', 'b0ase', 'b0asex', 'zed']);
+  });
+  test('vault and gift first, then each list in the order given', () => {
+    const q = buildQueue([['words', 'apple'], ['aaa', 'zed']], ['zz'], ['yy']);
+    expect(q.map((x) => x.name)).toEqual(['yy', 'zz', 'apple', 'words', 'aaa', 'zed']);
   });
   test('vault and gift names are minted too and routed to the owner, gift winning over vault', () => {
     const q = buildQueue([['alice', 'bob']], ['bob', 'keepme'], ['keepme', 'gifty']);
     expect(q).toEqual([
-      { name: 'alice', route: 'sell' },
       { name: 'bob', route: 'vault' },
       { name: 'gifty', route: 'gift' },
       { name: 'keepme', route: 'gift' },
+      { name: 'alice', route: 'sell' },
     ]);
   });
 });
@@ -120,9 +124,9 @@ describe('runHeadless', () => {
     const r = await runHeadless(h.deps, state(['alice', 'bob', 'carol'], { vault: ['bob'], gift: ['carol'] }), h.ctl.signal);
     expect(r.stopped).toBe('finished');
     expect(h.minted).toEqual([
-      { name: 'alice', lockTo: undefined },
       { name: 'bob', lockTo: '1Owner' },
       { name: 'carol', lockTo: '1Owner' },
+      { name: 'alice', lockTo: undefined },
     ]);
     expect(h.listed.map((l) => l.name)).toEqual(['alice']);
     const bob = r.state.items.find((i) => i.name === 'bob')!;

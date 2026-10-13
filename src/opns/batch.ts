@@ -44,8 +44,23 @@ export const parseNameList = (text: string): ParsedList => {
   return { names, invalid };
 };
 
-/** Alphabetical: every prefix comes before the names that extend it (b0as < b0ase < b0asex). */
-export const orderForMinting = (names: string[]): string[] => [...names].sort();
+/**
+ * Valuable names first (owner, 13 Oct 2026: the full job takes ~11 days, so the best names must exist on day one):
+ * by `rank` (vault and gift 0, then the lists in the order given), alphabetical within a rank so every prefix
+ * comes before the names that extend it (b0as < b0ase < b0asex). No rank = alphabetical only.
+ */
+export const orderForMinting = (names: string[], rank?: ReadonlyMap<string, number>): string[] => {
+  const r = (n: string) => rank?.get(n) ?? Number.MAX_SAFE_INTEGER;
+  return [...names].sort((a, b) => r(a) - r(b) || (a < b ? -1 : a > b ? 1 : 0));
+};
+
+/** Rank for orderForMinting: vault and gift names 0, then each name's first list (1, 2, …). */
+export const mintRanks = (lists: string[][], vault: string[] = [], gift: string[] = []): Map<string, number> => {
+  const rank = new Map<string, number>();
+  for (const n of [...vault, ...gift]) rank.set(n, 0);
+  lists.forEach((l, i) => l.forEach((n) => rank.has(n) || rank.set(n, i + 1)));
+  return rank;
+};
 
 export type Route = 'sell' | 'vault' | 'gift';
 
@@ -57,7 +72,7 @@ export const buildQueue = (lists: string[][], vault: string[] = [], gift: string
   const v = new Set(vault);
   const g = new Set(gift);
   const all = new Set<string>([...lists.flat(), ...vault, ...gift]);
-  return orderForMinting([...all]).map((name) => ({ name, route: g.has(name) ? 'gift' : v.has(name) ? 'vault' : 'sell' }));
+  return orderForMinting([...all], mintRanks(lists, vault, gift)).map((name) => ({ name, route: g.has(name) ? 'gift' : v.has(name) ? 'vault' : 'sell' }));
 };
 
 // ---- prices -------------------------------------------------------------------------------------------
@@ -139,12 +154,14 @@ export const mergeState = (
   o: { to?: string; payTo?: string; budgetSats?: number },
 ): State => {
   const byName = new Map(saved.items.map((i) => [i.name, i]));
+  // The new queue's order wins (it is already ranked); names only in the saved job go after it.
+  const rank = new Map(queue.map((q, i) => [q.name, i]));
   for (const q of queue) {
     const cur = byName.get(q.name);
     if (!cur) byName.set(q.name, { ...q, status: 'pending', txids: [] });
     else if (cur.status === 'pending' || cur.status === 'mining' || cur.status === 'error') byName.set(q.name, { ...cur, route: q.route });
   }
-  const items = orderForMinting([...byName.keys()]).map((n) => {
+  const items = orderForMinting([...byName.keys()], rank).map((n) => {
     const i = byName.get(n)!;
     return i.status === 'mining' ? { ...i, status: 'pending' as const } : i;
   });
