@@ -81,6 +81,7 @@ export const prepare = (o: {
   payTo?: string;
   budgetSats?: number;
   fresh?: boolean;
+  prune?: boolean;
 }) => {
   const account = accountName(o.account);
   const lists = o.files.map(readList);
