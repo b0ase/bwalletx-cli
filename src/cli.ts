@@ -413,6 +413,85 @@ program
     }),
   );
 
+// OpNS: headless batch minting from one agent account (docs/OPNS-HEADLESS.md).
+const opns = program.command('opns').description('OpNS names: mint whole lists unattended from an agent account, watch, sweep');
+opns
+  .command('mint <files...>')
+  .description('mine every name in the lists (sorted, deduped, resumable); vault/gift names go to --to, the rest are listed for sale')
+  .option('-a, --account <name>', 'agent account (its BRC-100 wallet pays)')
+  .option('--to <address>', "owner's ordinals address: vault and gift names are locked straight to it")
+  .option('--to-pay <address>', 'owner address that sale proceeds pay to (OrdLock v2 pay address); default the agent account')
+  .option('--vault <file>', 'names to keep: minted to --to, never listed')
+  .option('--gift <file>', 'names to give: minted to --to, never listed')
+  .option('--budget <sats>', 'most this run may spend (fees + listings); remembered for later runs')
+  .option('--threads <n>', 'proof-of-work threads (default: cores - 1)')
+  .option('--fresh', 'forget the saved progress for this account and start a new job')
+  .option('-q, --quiet', 'no progress line (still writes the state + report files)')
+  .action(
+    run(async (files: string[], o: { account?: string; to?: string; toPay?: string; vault?: string; gift?: string; budget?: string; threads?: string; fresh?: boolean; quiet?: boolean }) => {
+      const { opnsMint, reportPath } = await import('./opns/headless.js');
+      const budgetSats = o.budget === undefined ? undefined : Number(o.budget);
+      if (budgetSats !== undefined && !(Number.isInteger(budgetSats) && budgetSats > 0)) throw new Error('--budget is a whole number of sats');
+      const threads = o.threads === undefined ? undefined : Number(o.threads);
+      const r = await opnsMint({ account: o.account, files, vault: o.vault, gift: o.gift, to: o.to, payTo: o.toPay, budgetSats, threads, fresh: o.fresh, quiet: o.quiet });
+      const { summarise } = await import('./opns/batch.js');
+      const m = summarise(r.state);
+      print({ stopped: r.stopped, error: r.error, ...m }, () =>
+        `${r.stopped === 'finished' ? 'Finished' : `Stopped (${r.error ?? r.stopped})`}: ${m.done}/${m.total} done, ${m.listed} listed, ${m.vaulted} to owner, ${m.skipped} taken, ${m.spentSats.toLocaleString()} sats spent.\n  report: ${reportPath(r.state.account)}`);
+      if (r.stopped === 'error') process.exitCode = 1;
+    }),
+  );
+opns
+  .command('status')
+  .description('progress of the batch job: names done, listed, spent, ETA')
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const { opnsStatus } = await import('./opns/headless.js');
+      const { fmtDuration } = await import('./opns/batch.js');
+      const s = opnsStatus(o.account);
+      if (!s) return print(null, () => 'No OpNS batch job for this account yet.');
+      print(s, () =>
+        [
+          `${s.account}: ${s.done}/${s.total} names done · ${s.listed} listed · ${s.vaulted} to owner · ${s.skipped} taken · ${s.pending} to go${s.notListed ? ` · ${s.notListed} not listed yet` : ''}`,
+          `  spent ${s.spentSats.toLocaleString()} of ${s.budgetSats.toLocaleString()} sats · ${s.txs} txs · ${s.secsPerChar ? `${s.secsPerChar.toFixed(1)} s/char` : ''} · ETA ${fmtDuration(s.etaSeconds)}`,
+          s.stopped ? `  last stop: ${s.stopped}` : '',
+          `  report: ${s.report}`,
+        ].filter(Boolean).join('\n'));
+    }),
+  );
+opns
+  .command('sweep')
+  .description('give it all back: cancel unsold listings, send every name in the agent wallet to --to, withdraw the remaining sats')
+  .option('-a, --account <name>', 'agent account')
+  .requiredOption('--to <address>', "owner's ordinals address for the names")
+  .option('--to-pay <address>', 'address for the remaining sats (default --to)')
+  .option('--names-only', 'leave the sats in the account')
+  .option('--keep-listed', 'leave names that are listed for sale where they are')
+  .option('-y, --yes', 'no confirmation prompt')
+  .action(
+    run(async (o: { account?: string; to: string; toPay?: string; namesOnly?: boolean; keepListed?: boolean; yes?: boolean }) => {
+      if (!o.yes && !process.env.BWALLETX_YES && !(await confirm(`Send every OpNS name${o.keepListed ? ' not listed' : ''} in the agent account to ${o.to}${o.namesOnly ? '' : ` and the remaining sats to ${o.toPay ?? o.to}`}?`)))
+        return console.log('Cancelled.');
+      const { opnsSweep } = await import('./opns/headless.js');
+      const r = await opnsSweep({ account: o.account, to: o.to, payTo: o.toPay, namesOnly: o.namesOnly, keepListed: o.keepListed });
+      const failed = r.names.filter((n) => n.action === 'failed');
+      print(r, () => `Sent ${r.names.filter((n) => n.action === 'sent').length} names to ${o.to}${r.sats ? `, ${r.sats.sats.toLocaleString()} sats (${r.sats.txid})` : ''}.${failed.map((f) => `\n  ${f.name}: ${f.error}`).join('')}`);
+    }),
+  );
+opns
+  .command('bench')
+  .description('measure proof-of-work speed on this machine')
+  .option('-s, --seconds <n>', 'how long', '8')
+  .option('--threads <n>', 'threads (default: cores - 1)')
+  .action(
+    run(async (o: { seconds: string; threads?: string }) => {
+      const { opnsBench } = await import('./opns/headless.js');
+      const r = await opnsBench(Number(o.seconds), o.threads ? Number(o.threads) : undefined);
+      print(r, () => `${r.threads} threads: ${r.mhs.toFixed(2)} MH/s · ~${r.secsPerChar.toFixed(1)} s per character on average (2^22 hashes)`);
+    }),
+  );
+
 // Bare `bwalletx`: the banner, then help.
 if (process.argv.length <= 2) {
   await banner();
