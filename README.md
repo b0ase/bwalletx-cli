@@ -168,6 +168,21 @@ asks before broadcasting; `-y` or `BWALLETX_YES=1` skips the prompt. The gate se
 including fees. `--dry-run` builds and verifies the purchase against the real listing with throwaway keys and
 a synthetic funding coin, without touching your account or broadcasting.
 
+## OpNS: mint whole name lists unattended
+
+```bash
+bwalletx opns mint lists/*.txt --vault keep.txt --gift gift.txt --to <ordinals address> --budget 72000000 -a opns
+bwalletx opns status -a opns      # progress, spent, ETA (also ~/.bwalletx/opns-batch-<account>.html)
+bwalletx opns sweep --to <address> -a opns   # cancel unsold listings, send names + remaining sats to the owner
+bwalletx opns bench               # proof-of-work speed on this machine
+```
+
+Mines every name from the agent account's own BRC-100 wallet, alphabetically (prefixes reused), re-checking each
+name right before it is mined; vault/gift names are locked straight to `--to`, the rest are listed with OrdLock v2
+at $1 / $5 / $15 by length. Resumable (`~/.bwalletx/opns-batch-<account>.json`), stops before going over `--budget`,
+Ctrl-C stops cleanly. Proof of work runs on worker threads. The covenant code is shared with bWalletX
+(`src/opns/opns*.ts`, copied with attribution). Owner runbook: [docs/OPNS-HEADLESS.md](docs/OPNS-HEADLESS.md).
+
 ## MCP
 
 Tools (reads are free; anything that spends passes the gate above, paper mode never signs, live key-file

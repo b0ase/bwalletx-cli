@@ -21,7 +21,9 @@
     "prepublishOnly": "pnpm build && pnpm test"
   },
   "dependencies": {
-    "@1sat/templates": "0.0.41",
+    "@1sat/actions": "0.0.234",
+    "@1sat/templates": "0.0.43",
+    "@1sat/types": "0.0.52",
     "@bsv/sdk": "^2.8.11",
     "@bsv/wallet-toolbox": "^2.14.5",
     "@modelcontextprotocol/sdk": "^1.32.0",
