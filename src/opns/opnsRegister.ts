@@ -146,7 +146,14 @@ export const mineName = async (
       // This node already has our next char mined (e.g. it is the restated parent of our own unconfirmed mint
       // and the cache / indexer pointed back at it). Mining it again fails the covenant: go to the child.
       const child = childOf(node, domain + name[domain.length]);
-      if (!child || tree?.isSpent(child) || retries++ >= 3) throw new Error(catchingUp(name));
+      if (!child || tree?.isSpent(child)) {
+        // A claimed char on a node the overlay handed us, and no child of ours: someone else (or another of our
+        // machines) mined it and the name index has not caught up. Taken, not "catching up" (14 Oct 2026: the
+        // laptop spent 90 minutes retrying names the Mac mini had already minted).
+        if (fromIndexer && !tree?.isOurs(name)) throw new NameTakenError(name);
+        throw new Error(catchingUp(name));
+      }
+      if (retries++ >= 3) throw new Error(catchingUp(name));
       outpoint = child;
       beefHint = node.beef;
       fromIndexer = false;

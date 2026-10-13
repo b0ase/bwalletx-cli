@@ -263,3 +263,13 @@ describe('mergeState prune', () => {
     expect(kept.items.length).toBe(3);
   });
 });
+
+describe('buildQueue listsOnly', () => {
+  test('vault and gift files route but add nothing', () => {
+    const q = buildQueue([['alice', 'bob']], ['bob', 'keepme'], ['gifty'], true);
+    expect(q).toEqual([
+      { name: 'bob', route: 'vault' },
+      { name: 'alice', route: 'sell' },
+    ]);
+  });
+});

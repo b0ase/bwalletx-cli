@@ -82,6 +82,7 @@ export const prepare = (o: {
   budgetSats?: number;
   fresh?: boolean;
   prune?: boolean;
+  listsOnly?: boolean;
 }) => {
   const account = accountName(o.account);
   const lists = o.files.map(readList);
@@ -94,6 +95,7 @@ export const prepare = (o: {
     lists.map((l) => l.names),
     vault?.names,
     gift?.names,
+    o.listsOnly,
   );
   const saved = o.fresh ? null : loadState(account);
   const state = saved
@@ -151,6 +153,8 @@ export type MintOptions = {
   quiet?: boolean;
   /** Drop pending names that are not in these lists (so another machine can take them). */
   prune?: boolean;
+  /** Vault/gift files route only; they add no names (a second machine). */
+  listsOnly?: boolean;
 };
 
 export async function opnsMint(o: MintOptions): Promise<RunResult> {

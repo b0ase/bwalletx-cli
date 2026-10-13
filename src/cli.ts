@@ -439,14 +439,15 @@ opns
   .option('--threads <n>', 'proof-of-work threads (default: cores - 1)')
   .option('--fresh', 'forget the saved progress for this account and start a new job')
   .option('--prune', 'drop names still to do that are not in these lists (hand them to another machine)')
+  .option('--lists-only', 'the --vault/--gift files only route names; they add none (a second machine)')
   .option('-q, --quiet', 'no progress line (still writes the state + report files)')
   .action(
-    run(async (files: string[], o: { account?: string; to?: string; toPay?: string; vault?: string; gift?: string; budget?: string; threads?: string; fresh?: boolean; prune?: boolean; quiet?: boolean }) => {
+    run(async (files: string[], o: { account?: string; to?: string; toPay?: string; vault?: string; gift?: string; budget?: string; threads?: string; fresh?: boolean; prune?: boolean; listsOnly?: boolean; quiet?: boolean }) => {
       const { opnsMint, reportPath } = await import('./opns/headless.js');
       const budgetSats = o.budget === undefined ? undefined : Number(o.budget);
       if (budgetSats !== undefined && !(Number.isInteger(budgetSats) && budgetSats > 0)) throw new Error('--budget is a whole number of sats');
       const threads = o.threads === undefined ? undefined : Number(o.threads);
-      const r = await opnsMint({ account: o.account, files, vault: o.vault, gift: o.gift, to: o.to, payTo: o.toPay, budgetSats, threads, fresh: o.fresh, prune: o.prune, quiet: o.quiet });
+      const r = await opnsMint({ account: o.account, files, vault: o.vault, gift: o.gift, to: o.to, payTo: o.toPay, budgetSats, threads, fresh: o.fresh, prune: o.prune, listsOnly: o.listsOnly, quiet: o.quiet });
       const { summarise } = await import('./opns/batch.js');
       const m = summarise(r.state);
       print({ stopped: r.stopped, error: r.error, ...m }, () =>

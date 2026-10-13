@@ -68,10 +68,11 @@ export type Route = 'sell' | 'vault' | 'gift';
  * The whole job: names from all lists (vault and gift lists are minted too), deduped and sorted. A name in the
  * vault or gift list is routed there even when it also appears in a sale list.
  */
-export const buildQueue = (lists: string[][], vault: string[] = [], gift: string[] = []): { name: string; route: Route }[] => {
+export const buildQueue = (lists: string[][], vault: string[] = [], gift: string[] = [], listsOnly = false): { name: string; route: Route }[] => {
   const v = new Set(vault);
   const g = new Set(gift);
-  const all = new Set<string>([...lists.flat(), ...vault, ...gift]);
+  // listsOnly (a second machine): the vault/gift files only decide where a name goes; they add no names.
+  const all = new Set<string>(listsOnly ? lists.flat() : [...lists.flat(), ...vault, ...gift]);
   return orderForMinting([...all], mintRanks(lists, vault, gift)).map((name) => ({ name, route: g.has(name) ? 'gift' : v.has(name) ? 'vault' : 'sell' }));
 };
 
