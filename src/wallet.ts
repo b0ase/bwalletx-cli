@@ -105,6 +105,8 @@ export async function broadcast(tx: Transaction): Promise<string> {
   });
   const body = (await res.text()).replace(/"/g, '').trim();
   if (res.ok && /^[0-9a-f]{64}$/.test(body)) return body;
+  // ARC accepted it but answered oddly, then WhatsOnChain sees it already: that is a success (13 Oct 2026, a gift send).
+  if (/already in the mempool|already known|txn-already-known/i.test(body)) return txid;
   throw new Error(`Broadcast failed: ARC ${arcErr}; WhatsOnChain ${res.status} ${body.slice(0, 200)}`);
 }
 
