@@ -57,5 +57,10 @@
     "agent",
     "bwalletx",
     "1sat"
-  ]
+  ],
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
+  }
 }
