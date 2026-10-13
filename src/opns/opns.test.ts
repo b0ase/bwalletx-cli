@@ -1,5 +1,5 @@
 // Ported from bWalletX src/mobile/names/opns.test.ts (bun:test → vitest); same golden vectors.
-import { describe, expect, test } from 'vitest';
+import { followForward, describe, expect, test } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -353,5 +353,20 @@ describe('mineName orchestration', () => {
     await expect(
       mineName({ ctx: fakeCtx, fetch: routes({}) }, 'bad_name', new AbortController().signal, () => undefined),
     ).rejects.toThrow('a-z, 0-9');
+  });
+});
+
+import { describe as d2, expect as e2, test as t2 } from 'vitest';
+import { followForward as ff } from './opnsRegister.js';
+d2('followForward', () => {
+  t2('walks spends to the unspent head and stops at 404', async () => {
+    const spent: Record<string, string> = { 'a.0': 'b', 'b.0': 'c' };
+    const f = (async (url: string) => {
+      const m = /tx\/([^/]+)\/(\d+)\/spent/.exec(url)!;
+      const next = spent[`${m[1]}.${m[2]}`];
+      return next ? new Response(JSON.stringify({ txid: next, vin: 0 }), { status: 200 }) : new Response('', { status: 404 });
+    }) as unknown as Parameters<typeof ff>[0];
+    e2(await ff(f, 'a.0')).toBe('c.0');
+    e2(await ff(f, 'c.0')).toBe('c.0');
   });
 });

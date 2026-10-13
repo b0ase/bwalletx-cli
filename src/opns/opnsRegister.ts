@@ -105,6 +105,33 @@ const childOf = (node: LoadedNode, domain: string): string | null => {
   return st?.domain === domain ? `${node.tx.id('hex')}.1` : null;
 };
 
+/**
+ * The 1Sat overlay can lag days behind the chain (14 Oct 2026: its "bo" node had been spent and re-stated by
+ * others long ago, so every bo* name died of double-spends). Walk a node's spends forward on WhatsOnChain to the
+ * live head: each spend is a mint whose output 0 re-states the same parent domain.
+ */
+const WOC = 'https://api.whatsonchain.com/v1/bsv/main';
+export const followForward = async (f: Fetch, outpoint: string, maxHops = 60): Promise<string> => {
+  let [txid, v] = outpoint.split(/[._]/);
+  let vout = Number(v);
+  let waits = 0;
+  for (let hop = 0; hop < maxHops; ) {
+    const res = await f(`${WOC}/tx/${txid}/${vout}/spent`).catch(() => null);
+    if (!res) break;
+    if (res.status === 429 && waits++ < 5) {
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
+    }
+    if (!res.ok) break; // 404 = unspent: this is the head
+    const j = (await res.json().catch(() => null)) as { txid?: string } | null;
+    if (!j?.txid) break;
+    txid = j.txid;
+    vout = 0;
+    hop++;
+  }
+  return `${txid}.${vout}`;
+};
+
 const catchingUp = (name: string) =>
   `The name tree for "${name}" is still catching up with your last mints. Wait for them to confirm (about 10 minutes), then try again.`;
 
@@ -134,6 +161,13 @@ export const mineName = async (
   const totalChars = name.length - first.domain.length;
   const steps: MintStepResult[] = [];
   let outpoint = first.outpoint;
+  if (first.fromIndexer) {
+    const head = await followForward(deps.fetch, first.outpoint);
+    if (head !== first.outpoint) {
+      tree?.markSpent(first.outpoint);
+      outpoint = head;
+    }
+  }
   let beefHint = first.beefHint;
   let fromIndexer = first.fromIndexer; // the node came from the overlay (vs our own fresh/cached child)
   let retries = 0;
@@ -209,6 +243,13 @@ export const mineName = async (
       // That node is gone (spent by someone, maybe our own unconfirmed mint): never try it again.
       tree?.markSpent(node.outpoint);
       if (await isTaken(deps.fetch, name)) throw new NameTakenError(name);
+      const head = await followForward(deps.fetch, node.outpoint);
+      if (head !== node.outpoint && retries++ < 6) {
+        outpoint = head;
+        beefHint = undefined;
+        fromIndexer = true;
+        continue;
+      }
       const next = pickNode(tree, name, await fetchMineNode(deps.fetch, name));
       if (retries++ >= 3 || !next || next.outpoint === node.outpoint) throw new Error(catchingUp(name));
       outpoint = next.outpoint;
