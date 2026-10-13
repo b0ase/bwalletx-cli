@@ -29,6 +29,16 @@ const KEEP_MS = 14 * 24 * 3600 * 1000;
 const SPENT_MS = 2 * 24 * 3600 * 1000;
 const norm = (op: string) => op.replace('_', '.');
 const empty = (): TreeState => ({ v: 1, nodes: {}, spent: {}, names: {} });
+/**
+ * A node's BEEF (its whole ancestry, a few MB after a long run) is only a hint for our own transactions the
+ * providers have not seen yet. After this long they have; loadNode fetches BEEF by txid instead. Without this the
+ * cache file reached 512 MB and the minter died of heap exhaustion re-serialising it (13 Oct 2026).
+ */
+const BEEF_MS = 30 * 60_000;
+const trimBeef = (nodes: Record<string, CachedNode>, now: number) => {
+  for (const n of Object.values(nodes)) if (n.beef && now - n.at > BEEF_MS) delete n.beef;
+  return nodes;
+};
 
 export class OpnsTree {
   private s: TreeState;
@@ -46,7 +56,7 @@ export class OpnsTree {
       const s = JSON.parse(this.kv?.getItem(this.key) ?? 'null') as TreeState | null;
       if (!s || s.v !== 1 || typeof s.nodes !== 'object') return empty();
       const cutoff = this.now() - KEEP_MS;
-      const nodes = Object.fromEntries(Object.entries(s.nodes).filter(([, n]) => n.at >= cutoff));
+      const nodes = trimBeef(Object.fromEntries(Object.entries(s.nodes).filter(([, n]) => n.at >= cutoff)), this.now());
       const names = Object.fromEntries(Object.entries(s.names ?? {}).filter(([, at]) => at >= cutoff));
       const spentCut = this.now() - SPENT_MS;
       const spent = Object.fromEntries(
@@ -59,6 +69,7 @@ export class OpnsTree {
   }
 
   private save() {
+    trimBeef(this.s.nodes, this.now());
     try {
       this.kv?.setItem(this.key, JSON.stringify(this.s));
     } catch {
@@ -107,7 +118,7 @@ export class OpnsTree {
     const at = this.now();
     const op = norm(spent);
     this.s.spent[op] = at;
-    this.s.nodes[parentDomain] = { domain: parentDomain, outpoint: `${step.txid}.0`, txid: step.txid, beef, at };
+    this.s.nodes[parentDomain] = { domain: parentDomain, outpoint: `${step.txid}.0`, txid: step.txid, at };
     this.s.nodes[step.newDomain] = { domain: step.newDomain, outpoint: step.childOutpoint, txid: step.txid, beef, at };
     this.s.names[step.newDomain] = at;
     this.save();
