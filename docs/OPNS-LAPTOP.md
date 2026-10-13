@@ -15,7 +15,7 @@ Keep name in either slice still goes to the owner.
 
 ```sh
 # 1. Node 22 + pnpm
-brew install node@22 && corepack enable
+brew install node && npm install -g pnpm
 # 2. The CLI (opns commands are on main; the npm release does not have them yet)
 git clone https://github.com/b0ase/bwalletx-cli.git ~/bwalletx-cli
 cd ~/bwalletx-cli && pnpm install && pnpm build && pnpm link --global
