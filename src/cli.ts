@@ -461,6 +461,20 @@ opns
     }),
   );
 opns
+  .command('send <to> <names...>')
+  .description('send names from the agent account to one ordinals address (a gift)')
+  .option('-a, --account <name>', 'agent account')
+  .option('-y, --yes', 'no confirmation prompt')
+  .action(
+    run(async (to: string, names: string[], o: { account?: string; yes?: boolean }) => {
+      if (!o.yes && !process.env.BWALLETX_YES && !(await confirm(`Send ${names.join(', ')} to ${to}? This cannot be undone.`))) return console.log('Cancelled.');
+      const { opnsSend } = await import('./opns/headless.js');
+      const r = await opnsSend({ account: o.account, names, to });
+      for (const n of r.names) console.log(n.action === 'sent' ? `${n.name}: sent ${n.txid}` : `${n.name}: FAILED ${n.error}`);
+      if (r.names.some((n) => n.action === 'failed')) process.exitCode = 1;
+    }),
+  );
+opns
   .command('sweep')
   .description('give it all back: cancel unsold listings, send every name in the agent wallet to --to, withdraw the remaining sats')
   .option('-a, --account <name>', 'agent account')

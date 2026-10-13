@@ -302,3 +302,30 @@ export async function opnsBench(seconds = 8, threads?: number) {
 
 /** For the runbook / plan: funding needed for a set of lists (chars from a quick local estimate). */
 export const fundingFor = (chars: number, listed: number) => chars * PER_CHAR_SATS + listed * LIST_FEE_SATS;
+
+/** Send named OpNS names from the agent account to one address (gifts: owner, 13 Oct 2026). Listed names are skipped. */
+export async function opnsSend(o: { account?: string; names: string[]; to: string }) {
+  const { name, w } = await brc100Account(accountName(o.account));
+  w.startMonitor();
+  const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
+  const out: { name: string; action: string; txid?: string; error?: string }[] = [];
+  try {
+    for (const raw of o.names) {
+      const nm = raw.trim().toLowerCase();
+      try {
+        const id = await opnsIdFor(ctx, nm);
+        if (!id) throw new Error('not in this account (or listed for sale)');
+        const s = await sendOpns.execute(ctx, { id, address: o.to });
+        if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
+        out.push({ name: nm, action: 'sent', txid: s.txid });
+        appendLog(name, { at: Date.now(), action: 'opns-send', detail: `${nm} → ${o.to} ${s.txid}`, usd: 0 });
+      } catch (e) {
+        out.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    await w.sendWaiting();
+    return { account: name, names: out };
+  } finally {
+    await w.close();
+  }
+}
