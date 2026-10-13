@@ -107,7 +107,17 @@ const oneSatServices = () => {
   const toolbox = require('@bsv/wallet-toolbox') as typeof import('@bsv/wallet-toolbox');
   const s = new toolbox.Services('main');
   return {
-    getBeefForTxid: async (txid: string) => Beef.fromBinary((await s.getBeefForTxid(txid)).toBinary()),
+    // A node we broadcast seconds ago may not be at the toolbox providers yet: try for ~2 minutes before giving up.
+    getBeefForTxid: async (txid: string) => {
+      for (let i = 1; ; i++) {
+        try {
+          return Beef.fromBinary((await s.getBeefForTxid(txid)).toBinary());
+        } catch (e) {
+          if (i >= 5) throw e;
+          await new Promise((r) => setTimeout(r, 10_000 * i));
+        }
+      }
+    },
   } as unknown as OneSatContext['services'];
 };
 

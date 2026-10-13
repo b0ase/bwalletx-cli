@@ -253,11 +253,16 @@ export type RunResult = { stopped: 'finished' | 'cancelled' | 'budget' | 'funds'
 export const isRetryableListError = (msg: string) =>
   /REVIEW_ACTIONS|require review|missing.?inputs|orphan|double|conflict|not found|timeout|fetch/i.test(msg);
 /** Network trouble while mining a name: wait and retry the name instead of stopping the night's run. */
-export const isTransient = (msg: string) => /fetch failed|timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN|socket|429|50[234]/i.test(msg);
+// "must be valid transaction on chain" / "not found": a parent we just broadcast has not reached that provider yet
+// (13 Oct 2026: it stopped the run on bitcoin3d although the txid was on chain minutes later).
+export const isTransient = (msg: string) =>
+  /fetch failed|timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN|socket|429|50[234]|must be valid transaction|not found|unknown tx|bad gateway|unavailable|rate limit/i.test(
+    msg,
+  );
 
 const LIST_RETRIES = 2;
 const LIST_RETRY_MS = 5000;
-const NAME_RETRIES = 2;
+const NAME_RETRIES = 4;
 const NAME_RETRY_MS = 30_000;
 
 export const BUDGET_STOP = 'Stopped before going over the budget';

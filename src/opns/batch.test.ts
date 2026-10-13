@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   buildQueue,
+  isTransient,
   mergeState,
   newState,
   parseNameList,
@@ -229,5 +230,14 @@ describe('runHeadless', () => {
     const r = await runHeadless(h.deps, state(['alice']), h.ctl.signal);
     expect(r.stopped).toBe('killed');
     expect(h.minted).toEqual([]);
+  });
+});
+
+describe('isTransient', () => {
+  test('a parent not yet at the provider is retried, a covenant failure is not', () => {
+    expect(isTransient('The txid abc parameter must be valid transaction on chain main')).toBe(true);
+    expect(isTransient('HttpError: not found')).toBe(true);
+    expect(isTransient('502 Bad Gateway')).toBe(true);
+    expect(isTransient('Covenant check failed')).toBe(false);
   });
 });
