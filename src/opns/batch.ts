@@ -262,7 +262,7 @@ export const isRetryableListError = (msg: string) =>
 // "must be valid transaction on chain" / "not found": a parent we just broadcast has not reached that provider yet
 // (13 Oct 2026: it stopped the run on bitcoin3d although the txid was on chain minutes later).
 export const isTransient = (msg: string) =>
-  /fetch failed|timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN|socket|429|50[234]|must be valid transaction|not found|unknown tx|bad gateway|unavailable|rate limit/i.test(
+  /fetch failed|timeout|timed out|ECONN|ENOTFOUND|EAI_AGAIN|socket|429|50[234]|must be valid transaction|not found|unknown tx|bad gateway|unavailable|rate limit|still catching up/i.test(
     msg,
   );
 
@@ -277,6 +277,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let state: State = { ...start, stopped: undefined };
+  let failedInARow = 0;
   const commit = (patch: Partial<State>) => {
     state = { ...state, ...patch, updatedAt: now() };
     deps.save(state);
@@ -366,6 +367,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           },
         );
         if (steps.length) await listOne(i);
+        failedInARow = 0;
         break;
       } catch (e) {
         if (e instanceof MiningCancelled || signal.aborted) {
@@ -383,10 +385,12 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           if (signal.aborted) return end('cancelled');
           continue;
         }
-        // Anything else (covenant check failed locally, wallet refused, …): stop. Nothing bad was broadcast;
-        // the name stays pending so the next run retries it.
+        // Anything else (covenant check failed locally, wallet refused, …): note it and move on to the next name;
+        // the next run retries it. Ten failures in a row means something systemic: stop then (14 Oct 2026: a
+        // "still catching up" on one name used to end the whole night's run).
         set(i, { status: 'error', note: msg });
-        return end('error', `${it.name}: ${msg}`);
+        if (++failedInARow >= 10) return end('error', `${it.name}: ${msg} (10 names in a row failed)`);
+        break;
       }
     }
   }

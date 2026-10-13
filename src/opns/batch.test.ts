@@ -238,6 +238,7 @@ describe('isTransient', () => {
     expect(isTransient('The txid abc parameter must be valid transaction on chain main')).toBe(true);
     expect(isTransient('HttpError: not found')).toBe(true);
     expect(isTransient('502 Bad Gateway')).toBe(true);
+    expect(isTransient('The name tree for "jackpot" is still catching up with your last mints.')).toBe(true);
     expect(isTransient('Covenant check failed')).toBe(false);
   });
 });
