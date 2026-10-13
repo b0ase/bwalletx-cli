@@ -152,8 +152,14 @@ export const mergeState = (
   saved: State,
   queue: { name: string; route: Route }[],
   o: { to?: string; payTo?: string; budgetSats?: number },
+  prune = false,
 ): State => {
   const byName = new Map(saved.items.map((i) => [i.name, i]));
+  // --prune: names still to do that are not in these lists leave this job (another machine takes them).
+  if (prune) {
+    const keep = new Set(queue.map((q) => q.name));
+    for (const [n, i] of byName) if (!keep.has(n) && i.status !== 'done' && i.status !== 'skipped') byName.delete(n);
+  }
   // The new queue's order wins (it is already ranked); names only in the saved job go after it.
   const rank = new Map(queue.map((q, i) => [q.name, i]));
   for (const q of queue) {

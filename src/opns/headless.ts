@@ -96,7 +96,7 @@ export const prepare = (o: {
   );
   const saved = o.fresh ? null : loadState(account);
   const state = saved
-    ? mergeState(saved, queue, { to: o.to, payTo: o.payTo, budgetSats: o.budgetSats })
+    ? mergeState(saved, queue, { to: o.to, payTo: o.payTo, budgetSats: o.budgetSats }, o.prune)
     : newState(account, queue, { to: o.to, payTo: o.payTo, budgetSats: o.budgetSats ?? 0 });
   if (!(state.budgetSats > 0)) throw new Error('Give a spending limit with --budget <sats> (it is remembered for later runs).');
   return { account, state, invalid };
@@ -148,6 +148,8 @@ export type MintOptions = {
   threads?: number;
   fresh?: boolean;
   quiet?: boolean;
+  /** Drop pending names that are not in these lists (so another machine can take them). */
+  prune?: boolean;
 };
 
 export async function opnsMint(o: MintOptions): Promise<RunResult> {

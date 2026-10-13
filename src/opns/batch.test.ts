@@ -241,3 +241,14 @@ describe('isTransient', () => {
     expect(isTransient('Covenant check failed')).toBe(false);
   });
 });
+
+describe('mergeState prune', () => {
+  test('pending names not in the new lists leave the job; done ones stay', () => {
+    const s = newState('a', buildQueue([['alpha', 'beta', 'gamma']]), { to: '1Owner', budgetSats: 1e9 });
+    s.items[0].status = 'done';
+    const m = mergeState(s, buildQueue([['beta']]), {}, true);
+    expect(m.items.map((i) => `${i.name}:${i.status}`)).toEqual(['beta:pending', 'alpha:done']);
+    const kept = mergeState(s, buildQueue([['beta']]), {});
+    expect(kept.items.length).toBe(3);
+  });
+});
