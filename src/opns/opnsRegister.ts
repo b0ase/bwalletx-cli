@@ -125,6 +125,9 @@ export const mineName = async (
   if (tree?.isOurs(name)) return [];
   if (await isTaken(deps.fetch, name)) throw new NameTakenError(name);
   const indexed = await fetchMineNode(deps.fetch, name);
+  // The overlay already has a node for the whole name and it is not ours: someone (or another of our machines)
+  // mined it and the name index has not caught up. Taken, not "catching up".
+  if (indexed && indexed.domain === name) throw new NameTakenError(name);
   const first = pickNode(tree, name, indexed);
   if (!first) throw new Error(indexed ? catchingUp(name) : `No mine-tree node found for "${name}"`);
 
@@ -146,6 +149,8 @@ export const mineName = async (
       // This node already has our next char mined (e.g. it is the restated parent of our own unconfirmed mint
       // and the cache / indexer pointed back at it). Mining it again fails the covenant: go to the child.
       const child = childOf(node, domain + name[domain.length]);
+      // The claimed char completes the name and we hold nothing for it: the name is somebody's already.
+      if (domain.length + 1 === name.length && !tree?.isOurs(name)) throw new NameTakenError(name);
       if (!child || tree?.isSpent(child)) {
         // A claimed char on a node the overlay handed us, and no child of ours: someone else (or another of our
         // machines) mined it and the name index has not caught up. Taken, not "catching up" (14 Oct 2026: the
