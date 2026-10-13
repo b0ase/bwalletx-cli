@@ -465,12 +465,13 @@ opns
   .description('send names from the agent account to one ordinals address (a gift)')
   .option('-a, --account <name>', 'agent account')
   .option('-y, --yes', 'no confirmation prompt')
+  .option('--dry-run', 'show what would be sent, send nothing')
   .action(
-    run(async (to: string, names: string[], o: { account?: string; yes?: boolean }) => {
-      if (!o.yes && !process.env.BWALLETX_YES && !(await confirm(`Send ${names.join(', ')} to ${to}? This cannot be undone.`))) return console.log('Cancelled.');
+    run(async (to: string, names: string[], o: { account?: string; yes?: boolean; dryRun?: boolean }) => {
+      if (!o.dryRun && !o.yes && !process.env.BWALLETX_YES && !(await confirm(`Send ${names.join(', ')} to ${to}? This cannot be undone.`))) return console.log('Cancelled.');
       const { opnsSend } = await import('./opns/headless.js');
-      const r = await opnsSend({ account: o.account, names, to });
-      for (const n of r.names) console.log(n.action === 'sent' ? `${n.name}: sent ${n.txid}` : `${n.name}: FAILED ${n.error}`);
+      const r = await opnsSend({ account: o.account, names, to, dryRun: o.dryRun });
+      for (const n of r.names) console.log(n.action === 'sent' ? `${n.name}: sent ${n.txid}` : n.action === 'failed' ? `${n.name}: FAILED ${n.error}` : `${n.name}: ${n.action}`);
       if (r.names.some((n) => n.action === 'failed')) process.exitCode = 1;
     }),
   );

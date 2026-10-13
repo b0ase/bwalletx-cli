@@ -6,7 +6,8 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { Beef, type WalletInterface } from '@bsv/sdk';
+import { Beef, P2PKH, PrivateKey, SatoshisPerKilobyte, Transaction, type WalletInterface } from '@bsv/sdk';
+import { broadcast, rawTx, utxos } from '../wallet.js';
 import { cancelOpnsListing, listOpns, sellOpns, sendOpns, type OneSatContext } from '@1sat/actions';
 import { brc100Account, withdrawFrom } from '../brc100Actions.js';
 import { bsvUsd } from '../market.js';
@@ -303,22 +304,82 @@ export async function opnsBench(seconds = 8, threads?: number) {
 /** For the runbook / plan: funding needed for a set of lists (chars from a quick local estimate). */
 export const fundingFor = (chars: number, listed: number) => chars * PER_CHAR_SATS + listed * LIST_FEE_SATS;
 
+/**
+ * Where a vault/gift name minted by this job sits: the 1-sat output of its last mint tx that pays the account's own
+ * ordinals address (P2PKH followed by the inscription envelope). Those outputs are outside the BRC-100 wallet's
+ * baskets, so sendOpns cannot see them; WhatsOnChain does not index them by address either.
+ */
+const giftOutpoint = async (account: string, nm: string, ordAddress: string): Promise<{ tx: Transaction; vout: number } | null> => {
+  const st = loadState(account);
+  const it = st?.items.find((i) => i.name === nm && i.status === 'done');
+  const txid = it?.txids.at(-1);
+  if (!txid) return null;
+  const tx = Transaction.fromHex(await rawTx(txid));
+  const p2pkh = new P2PKH().lock(ordAddress).toHex();
+  const vout = tx.outputs.findIndex((o) => o.satoshis === 1 && o.lockingScript.toHex().startsWith(p2pkh));
+  return vout < 0 ? null : { tx, vout };
+};
+
 /** Send named OpNS names from the agent account to one address (gifts: owner, 13 Oct 2026). Listed names are skipped. */
-export async function opnsSend(o: { account?: string; names: string[]; to: string }) {
-  const { name, w } = await brc100Account(accountName(o.account));
+export async function opnsSend(o: { account?: string; names: string[]; to: string; dryRun?: boolean }) {
+  const { name, keys, b, w } = await brc100Account(accountName(o.account));
   w.startMonitor();
   const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
+  const ordKey = PrivateKey.fromWif(keys.ordPk);
+  const payKey = PrivateKey.fromWif(keys.payPk);
+  const ordAddress = ordKey.toAddress();
+  const payAddress = payKey.toAddress();
   const out: { name: string; action: string; txid?: string; error?: string }[] = [];
+  // Fee coins come from the pay address. The minter moved everything into the BRC-100 wallet, so top it up from
+  // there once (a few thousand sats) and wait for the coin to show.
+  const feeCoins = async () => {
+    let coins = (await utxos(payAddress)).filter((u) => u.value > 1);
+    if (coins.length) return coins;
+    if (o.dryRun) return coins;
+    const have = await b.walletBalance(w);
+    const rate = await bsvUsd();
+    const topUp = await withdrawFrom(name, w, { amount: (5000 / 1e8) * rate, address: payAddress, have, rate, relay: b.relayToArc });
+    for (let i = 0; i < 12 && !coins.length; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      coins = (await utxos(payAddress)).filter((u) => u.value > 1);
+    }
+    if (!coins.length) throw new Error(`fee top-up ${topUp?.txid ?? ''} not visible yet; try again in a minute`);
+    return coins;
+  };
   try {
     for (const raw of o.names) {
       const nm = raw.trim().toLowerCase();
       try {
         const id = await opnsIdFor(ctx, nm);
-        if (!id) throw new Error('not in this account (or listed for sale)');
-        const s = await sendOpns.execute(ctx, { id, address: o.to });
-        if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
-        out.push({ name: nm, action: 'sent', txid: s.txid });
-        appendLog(name, { at: Date.now(), action: 'opns-send', detail: `${nm} → ${o.to} ${s.txid}`, usd: 0 });
+        if (id) {
+          if (o.dryRun) {
+            out.push({ name: nm, action: 'would send (wallet basket)' });
+            continue;
+          }
+          const s = await sendOpns.execute(ctx, { id, address: o.to });
+          if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
+          out.push({ name: nm, action: 'sent', txid: s.txid });
+          appendLog(name, { at: Date.now(), action: 'opns-send', detail: `${nm} → ${o.to} ${s.txid}`, usd: 0 });
+          continue;
+        }
+        const g = await giftOutpoint(name, nm, ordAddress);
+        if (!g) throw new Error('not in this account (or listed for sale)');
+        const coins = await feeCoins();
+        if (o.dryRun) {
+          out.push({ name: nm, action: `would send ${g.tx.id('hex')}.${g.vout} (fee from ${coins.length} coin(s) at ${payAddress})` });
+          continue;
+        }
+        const tx = new Transaction();
+        tx.addInput({ sourceTransaction: g.tx, sourceOutputIndex: g.vout, unlockingScriptTemplate: new P2PKH().unlock(ordKey) });
+        const c = coins.sort((x, y) => y.value - x.value)[0];
+        tx.addInput({ sourceTransaction: Transaction.fromHex(await rawTx(c.tx_hash)), sourceOutputIndex: c.tx_pos, unlockingScriptTemplate: new P2PKH().unlock(payKey) });
+        tx.addOutput({ lockingScript: new P2PKH().lock(o.to), satoshis: 1 });
+        tx.addOutput({ lockingScript: new P2PKH().lock(payAddress), change: true });
+        await tx.fee(new SatoshisPerKilobyte(100));
+        await tx.sign();
+        const txid = await broadcast(tx);
+        out.push({ name: nm, action: 'sent', txid });
+        appendLog(name, { at: Date.now(), action: 'opns-send', detail: `${nm} → ${o.to} ${txid}`, usd: 0 });
       } catch (e) {
         out.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
       }
