@@ -26,7 +26,7 @@ const takenFetch =
   };
 
 /** A fake chain: mining a name costs one character per letter beyond what is already ours. */
-const harness = (o: Partial<RunDeps> & { taken?: string[]; failOn?: string; cancelOn?: string } = {}) => {
+const harness = (o: Partial<RunDeps> & { taken?: string[]; failOn?: string | string[]; cancelOn?: string } = {}) => {
   const ours = new Set<string>();
   const minted: { name: string; lockTo?: string }[] = [];
   const listed: { name: string; sats: number }[] = [];
@@ -37,7 +37,7 @@ const harness = (o: Partial<RunDeps> & { taken?: string[]; failOn?: string; canc
       ctl.abort();
       throw new MiningCancelled();
     }
-    if (name === o.failOn) throw new Error('OpNS covenant check failed locally, not broadcast: OP_VERIFY failed');
+    if (o.failOn && (Array.isArray(o.failOn) ? o.failOn.includes(name) : name === o.failOn)) throw new Error('OpNS covenant check failed locally, not broadcast: OP_VERIFY failed');
     const steps = [];
     let from = 0;
     for (let k = name.length - 1; k > 0; k--) if (ours.has(name.slice(0, k))) (from = k), (k = 0);
@@ -197,19 +197,29 @@ describe('runHeadless', () => {
     expect(r.state.items.map((i) => i.status)).toEqual(['done', 'pending', 'pending']);
   });
 
-  test('a mint the local covenant check blocks stops the run: nothing after it, no listing, retried next run', async () => {
+  test('a mint the local covenant check blocks is noted and skipped: the run goes on, the name is retried next run', async () => {
     const h = harness({ failOn: 'bob' });
     const r = await runHeadless(h.deps, state(['alice', 'bob', 'carol']), h.ctl.signal);
-    expect(r.stopped).toBe('error');
-    expect(r.error).toMatch(/covenant check failed locally/);
-    expect(h.minted.map((m) => m.name)).toEqual(['alice']);
-    expect(h.listed.map((l) => l.name)).toEqual(['alice']);
+    expect(r.stopped).toBe('finished');
+    expect(h.minted.map((m) => m.name)).toEqual(['alice', 'carol']);
+    expect(h.listed.map((l) => l.name)).toEqual(['alice', 'carol']);
     expect(r.state.items[1]).toMatchObject({ status: 'error', txids: [] });
+    expect(r.state.items[1].note).toMatch(/covenant check failed locally/);
     const h2 = harness();
     h2.ours.add('alice');
+    h2.ours.add('carol');
     const r2 = await runHeadless(h2.deps, mergeState(r.state, [], {}), h2.ctl.signal);
     expect(r2.stopped).toBe('finished');
-    expect(h2.minted.map((m) => m.name)).toEqual(['bob', 'carol']);
+    expect(h2.minted.map((m) => m.name)).toEqual(['bob']);
+  });
+
+  test('ten failures in a row stop the run', async () => {
+    const names = Array.from({ length: 12 }, (_, i) => `name${String(i).padStart(2, '0')}`);
+    const h = harness({ failOn: names });
+    const r = await runHeadless(h.deps, state(names), h.ctl.signal);
+    expect(r.stopped).toBe('error');
+    expect(r.error).toMatch(/10 names in a row failed/);
+    expect(r.state.items.filter((i) => i.status === 'error').length).toBe(10);
   });
 
   test('a failed listing never stops minting and is retried at the end', async () => {
