@@ -380,9 +380,12 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           break;
         }
         const msg = e instanceof Error ? e.message : String(e);
-        if (isTransient(msg) && attempt++ < NAME_RETRIES) {
+        // "Still catching up" is usually the overlay lagging behind our own mints: two quick retries, then move on
+        // (the next run retries it); the slow 30/60/90/120 s ladder is for real network trouble.
+        const catching = /still catching up/i.test(msg);
+        if (isTransient(msg) && attempt++ < (catching ? 2 : NAME_RETRIES)) {
           set(i, { status: 'pending', note: `Retrying after: ${msg}` });
-          await sleep(NAME_RETRY_MS * attempt);
+          await sleep(catching ? 10_000 * attempt : NAME_RETRY_MS * attempt);
           if (signal.aborted) return end('cancelled');
           continue;
         }
