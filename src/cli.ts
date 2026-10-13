@@ -80,6 +80,18 @@ key
     }),
   );
 
+key
+  .command('new <name>')
+  .description('make a fresh agent account on this machine: new keys in an encrypted key file (keep it), then imported')
+  .option('--out <file>', 'where to write the key file', '<name>.key.json')
+  .action(
+    run(async (name: string, o: { out: string }) => {
+      const out = o.out === '<name>.key.json' ? `${name}.key.json` : o.out;
+      const a = await act.newKey(name, out, process.env.BWALLETX_PASSPHRASE || undefined);
+      print(a, () => `Made "${a.name}"\n  pay address: ${a.payAddress}\n  ord address: ${a.ordAddress}\n  key file: ${out} (keep it; it is the only copy of these keys)\n  stored: ${keyFilePath(a.name)} (encrypted, mode 600)`);
+    }),
+  );
+
 program
   .command('accounts')
   .description('list imported agent accounts')

@@ -1,6 +1,6 @@
 /** Operations shared by the CLI, `agent run` and the MCP server. Every spend goes through gateAction. */
-import { readFileSync } from 'node:fs';
-import { decryptKeyFile, validateKeyFile, type AgentKeys } from './keyfile.js';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { decryptKeyFile, encryptKeyFile, validateKeyFile, type AgentKeys } from './keyfile.js';
 import { bsvBalanceSats, bsvUsd, listings, normTokenId, outpointUnspent, overlayFee, overlayValid, pickListing, submitOverlay, tokenBalances, tokenPrice, TOKEN_ID } from './market.js';
 import { P2PKH, PrivateKey, Transaction } from '@bsv/sdk';
 import { buildPurchase, marketFeeSats, verifyPurchase } from './buy.js';
@@ -37,6 +37,22 @@ import {
   type AccountConfig,
 } from './store.js';
 import { addressOf, broadcast, buildSend, notifyP2p, rawTx, resolveDestination, utxos, DEFAULT_SATS_PER_KB } from './wallet.js';
+
+/**
+ * A fresh agent account made here (14 Oct 2026, for a second mining machine when Desktop's Add account would not
+ * take the master password): three new keys, encrypted into a bwalletx.agentkey/1 file with a passphrase, then
+ * imported like an exported one. It does not appear in the bWalletX app; `opns sweep` hands everything back.
+ */
+export async function newKey(name: string, out: string, passphrase?: string) {
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(name)) throw new Error('Account names are letters, digits, - and _');
+  const keys: AgentKeys = { payPk: PrivateKey.fromRandom().toWif(), ordPk: PrivateKey.fromRandom().toWif(), identityPk: PrivateKey.fromRandom().toWif() };
+  const pass = passphrase ?? (await getPassphrase(`New passphrase for ${name}: `));
+  if (pass.length < 8) throw new Error('Use a passphrase of at least 8 characters');
+  if (!passphrase && (await getPassphrase('Again: ')) !== pass) throw new Error('The passphrases differ');
+  const file = await encryptKeyFile(name, addressOf(keys.identityPk), keys, pass);
+  writeFileSync(out, JSON.stringify(file, null, 2) + '\n', { mode: 0o600 });
+  return importKey(out, pass);
+}
 
 export async function importKey(file: string, passphrase?: string) {
   const parsed = validateKeyFile(JSON.parse(readFileSync(file, 'utf8')));
