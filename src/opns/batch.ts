@@ -17,6 +17,7 @@ import { MiningCancelled, NameTakenError, type Progress } from './opnsRegister.j
 import { EXPECTED_HASHES } from './opnsPow.js';
 import { isTaken, OPNS_CHARSET } from './opnsMint.js';
 import type { Fetch } from './services.js';
+import { WOC } from '../market.js';
 
 // ---- lists --------------------------------------------------------------------------------------------
 
@@ -267,6 +268,39 @@ export const isTransient = (msg: string) =>
     msg,
   );
 
+/**
+ * The wallet refuses a transaction whose unconfirmed ancestry is deeper than 12 ("Maximum BEEF depth exceeded.
+ * Limit is 12"). Mints under one prefix chain off each other (each restates the parent), so a dozen names
+ * sharing a prefix inside one block window hit it (14 Oct 2026: it stopped the run on "ghana" after ten in a
+ * row). Nothing is wrong: the next block resets the depth. So wait for a block, then try the name again.
+ */
+export const isDepthLimit = (msg: string) => /Maximum BEEF depth/i.test(msg);
+const BLOCK_POLL_MS = 30_000;
+const BLOCK_WAIT_MAX_MS = 30 * 60_000;
+const DEPTH_WAITS = 3;
+
+/** Resolves when WhatsOnChain reports a new block (or after BLOCK_WAIT_MAX_MS / abort). */
+export const waitForNextBlock = async (
+  f: Fetch,
+  sleep: (ms: number) => Promise<void>,
+  signal: AbortSignal,
+  maxMs = BLOCK_WAIT_MAX_MS,
+  pollMs = BLOCK_POLL_MS,
+): Promise<boolean> => {
+  const height = async () => {
+    const r = await f(`${WOC}/chain/info`).catch(() => null);
+    const j = r?.ok ? ((await r.json().catch(() => null)) as { blocks?: number } | null) : null;
+    return typeof j?.blocks === 'number' ? j.blocks : null;
+  };
+  const start = await height();
+  for (let waited = 0; waited < maxMs && !signal.aborted; waited += pollMs) {
+    await sleep(pollMs);
+    const h = await height();
+    if (start === null || (h !== null && h > start)) return true;
+  }
+  return false;
+};
+
 const LIST_RETRIES = 2;
 const LIST_RETRY_MS = 5000;
 const NAME_RETRIES = 4;
@@ -329,6 +363,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
     if (signal.aborted) return end('cancelled');
     if (deps.stopped?.()) return end('killed', 'Kill switch is on (bwalletx resume to continue)');
     let attempt = 0;
+    let depthWaits = 0;
     for (;;) {
       try {
         if (deps.isOurs(it.name)) {
@@ -380,6 +415,12 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           break;
         }
         const msg = e instanceof Error ? e.message : String(e);
+        if (isDepthLimit(msg) && depthWaits++ < DEPTH_WAITS) {
+          set(i, { status: 'pending', note: `Waiting for the next block: ${msg}` });
+          await waitForNextBlock(deps.fetch, sleep, signal);
+          if (signal.aborted) return end('cancelled');
+          continue;
+        }
         // "Still catching up" is usually the overlay lagging behind our own mints: two quick retries, then move on
         // (the next run retries it); the slow 30/60/90/120 s ladder is for real network trouble.
         const catching = /still catching up/i.test(msg);

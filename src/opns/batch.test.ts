@@ -273,3 +273,22 @@ describe('buildQueue listsOnly', () => {
     ]);
   });
 });
+
+describe('BEEF depth limit (14 Oct 2026)', () => {
+  test('recognised, and the run waits for the next block', async () => {
+    const { isDepthLimit, waitForNextBlock } = await import('./batch.js');
+    expect(isDepthLimit('Maximum BEEF depth exceeded. Limit is 12')).toBe(true);
+    expect(isDepthLimit('still catching up')).toBe(false);
+    let h = 100;
+    const f = (async () => new Response(JSON.stringify({ blocks: h }))) as unknown as typeof fetch;
+    const slept: number[] = [];
+    const sleep = async (ms: number) => {
+      slept.push(ms);
+      if (slept.length === 2) h = 101;
+    };
+    const ok = await waitForNextBlock(f, sleep, new AbortController().signal, 10 * 60_000, 1000);
+    expect(ok).toBe(true);
+    expect(slept.length).toBe(2);
+  });
+});
+
