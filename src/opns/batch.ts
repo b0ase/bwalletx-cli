@@ -301,6 +301,11 @@ export const waitForNextBlock = async (
   return false;
 };
 
+/** Errors that clear by themselves after a block: worth another go later in the same run. */
+export const isRevisitable = (msg: string) => /still catching up|must be valid transaction|not found|unknown tx|BEEF depth/i.test(msg);
+const REVISIT_MS = 15 * 60_000;
+const REVISITS = 3;
+
 const LIST_RETRIES = 2;
 const LIST_RETRY_MS = 5000;
 const NAME_RETRIES = 4;
@@ -352,7 +357,26 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
   };
 
   deps.onUpdate(state);
+  // Names that failed on a hold ("still catching up": our own unconfirmed mint holds the prefix node) or on a
+  // parent the indexer hasn't seen yet clear within a block or two. Re-try them in the same run once
+  // REVISIT_MS has passed (14 Oct 2026: 13 such names sat in "error" until the next restart). Each name gets
+  // REVISITS goes; the pass jumps back to the earliest one and walks forward again (done names are skipped).
+  const failedAt = new Map<number, number>();
+  const revisits = new Map<number, number>();
   for (let i = 0; i < state.items.length; i++) {
+    const due = [...failedAt].filter(([, t]) => now() - t >= REVISIT_MS).map(([j]) => j);
+    if (due.length) {
+      for (const j of due) {
+        failedAt.delete(j);
+        revisits.set(j, (revisits.get(j) ?? 0) + 1);
+        set(j, { status: 'pending', note: 'Trying again after a block' });
+      }
+      const first = Math.min(...due);
+      if (first < i) {
+        i = first - 1;
+        continue;
+      }
+    }
     const it = state.items[i];
     if (it.status === 'mine' || it.status === 'done') {
       // A crash between mint and listing: list it now.
@@ -434,6 +458,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         // the next run retries it. Ten failures in a row means something systemic: stop then (14 Oct 2026: a
         // "still catching up" on one name used to end the whole night's run).
         set(i, { status: 'error', note: msg });
+        if (isRevisitable(msg) && (revisits.get(i) ?? 0) < REVISITS) failedAt.set(i, now());
         if (++failedInARow >= 10) return end('error', `${it.name}: ${msg} (10 names in a row failed)`);
         break;
       }

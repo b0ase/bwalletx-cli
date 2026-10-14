@@ -292,3 +292,12 @@ describe('BEEF depth limit (14 Oct 2026)', () => {
   });
 });
 
+
+describe('revisit held names in the same run (14 Oct 2026)', () => {
+  test('which errors are worth another go', async () => {
+    const { isRevisitable } = await import('./batch.js');
+    expect(isRevisitable('The name tree for "laura" is still catching up with your last mints.')).toBe(true);
+    expect(isRevisitable('The txid 792e… parameter must be valid transaction on chain main')).toBe(true);
+    expect(isRevisitable('covenant check failed at PC 2703')).toBe(false);
+  });
+});
