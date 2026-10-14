@@ -305,6 +305,8 @@ export const waitForNextBlock = async (
 export const isRevisitable = (msg: string) => /still catching up|must be valid transaction|not found|unknown tx|BEEF depth/i.test(msg);
 const REVISIT_MS = 15 * 60_000;
 const REVISITS = 3;
+/** Block waits per run when ten names in a row fail on holds (chain lag behind our own mints) before giving up. */
+export const BLOCK_PAUSES = 12;
 
 const LIST_RETRIES = 2;
 const LIST_RETRY_MS = 5000;
@@ -318,6 +320,8 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let state: State = { ...start, stopped: undefined };
   let failedInARow = 0;
+  let hardInARow = 0; // failures in the current streak that aren't holds
+  let blockPauses = 0;
   const commit = (patch: Partial<State>) => {
     state = { ...state, ...patch, updatedAt: now() };
     deps.save(state);
@@ -428,6 +432,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         );
         if (steps.length) await listOne(i);
         failedInARow = 0;
+        hardInARow = 0;
         break;
       } catch (e) {
         if (e instanceof MiningCancelled || signal.aborted) {
@@ -459,7 +464,18 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         // "still catching up" on one name used to end the whole night's run).
         set(i, { status: 'error', note: msg });
         if (isRevisitable(msg) && (revisits.get(i) ?? 0) < REVISITS) failedAt.set(i, now());
-        if (++failedInARow >= 10) return end('error', `${it.name}: ${msg} (10 names in a row failed)`);
+        if (!isRevisitable(msg)) hardInARow++;
+        if (++failedInARow >= 10) {
+          // A streak of holds ("still catching up" / depth / unknown tx) is the chain lagging behind our own mints,
+          // not breakage: wait for a block and carry on (14 Oct 2026: cyprus streak stopped the run at 887).
+          if (hardInARow === 0 && blockPauses++ < BLOCK_PAUSES) {
+            set(i, { status: 'error', note: `${msg} (pausing for the next block)` });
+            await waitForNextBlock(deps.fetch, sleep, signal);
+            if (signal.aborted) return end('cancelled');
+            failedInARow = 0;
+            hardInARow = 0;
+          } else return end('error', `${it.name}: ${msg} (10 names in a row failed)`);
+        }
         break;
       }
     }
