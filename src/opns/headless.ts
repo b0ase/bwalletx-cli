@@ -132,6 +132,17 @@ const opnsIdFor = async (ctx: OneSatContext, name: string): Promise<string | und
     if (!o.tags?.includes(`name:${name}`) || o.tags.some((t) => t.startsWith('ordlock'))) continue;
     return o.tags.find((t) => t.startsWith('id:'))?.slice(3) ?? o.outpoint;
   }
+  // Outputs returned by a cancelled listing carry no name: tag; their name is in customInstructions.
+  const all = await listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit: 10_000 });
+  for (const o of all.outputs) {
+    if (o.tags?.some((t) => t.startsWith('ordlock'))) continue;
+    try {
+      if ((JSON.parse(o.customInstructions ?? '') as { name?: unknown }).name !== name) continue;
+    } catch {
+      continue;
+    }
+    return o.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? o.outpoint;
+  }
   return undefined;
 };
 
@@ -296,7 +307,12 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
         const c = await cancelOpnsListing.execute(ctx, { id });
         if (c.error) throw new Error(String(c.error));
         out.push({ name: nm, action: 'unlisted', txid: c.txid });
-        id = (await opnsIdFor(ctx, nm)) ?? id;
+        await w.sendWaiting();
+        // The returned output has no name: tag either; find it by the cancel txid (its vout 0).
+        const back = (await listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit: 10_000 })).outputs.find(
+          (x) => x.outpoint.startsWith(`${c.txid}.`) || x.outpoint.startsWith(`${c.txid}_`),
+        );
+        id = back?.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? back?.outpoint ?? (await opnsIdFor(ctx, nm)) ?? id;
         const s = await sendOpns.execute(ctx, { id, address: o.to });
         if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
         out.push({ name: nm, action: 'sent', txid: s.txid });
