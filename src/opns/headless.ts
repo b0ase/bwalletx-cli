@@ -270,12 +270,21 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
   const want = new Set(o.names.map((n) => n.trim().toLowerCase()).filter(Boolean));
   const out: { name: string; action: string; txid?: string; error?: string }[] = [];
   try {
-    // Per-name lookups, as listedIn does: the unfiltered list leaves listings out.
-    const outputs = [];
-    for (const nm of want) outputs.push(...(await listOpns.execute(ctx, { names: [nm], includeTags: true, limit: 50 })).outputs);
+    // Listing outputs carry no name: tag; the name lives in customInstructions (as @1sat/actions nameFromOutput reads it).
+    const outputs = (await listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit: 10_000 })).outputs;
+    const nameOf = (o2: (typeof outputs)[number]) => {
+      const t = o2.tags?.find((x) => x.startsWith('name:'))?.slice(5);
+      if (t) return t.toLowerCase();
+      try {
+        const n = (JSON.parse(o2.customInstructions ?? '') as { name?: unknown }).name;
+        return typeof n === 'string' ? n.toLowerCase() : '';
+      } catch {
+        return '';
+      }
+    };
     const seen = new Set<string>();
     for (const o2 of outputs) {
-      const nm = o2.tags?.find((t) => t.startsWith('name:'))?.slice(5) ?? '';
+      const nm = nameOf(o2);
       if (!want.has(nm) || seen.has(nm) || !o2.tags?.some((t) => t.startsWith('ordlock'))) continue;
       seen.add(nm);
       let id = o2.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? o2.outpoint;
@@ -297,6 +306,8 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
       }
     }
     for (const nm of want) if (!seen.has(nm)) out.push({ name: nm, action: 'not listed here' });
+    const listings = outputs.filter((o2) => o2.tags?.some((t) => t.startsWith('ordlock'))).length;
+    out.unshift({ name: '(wallet)', action: `${outputs.length} OpNS outputs, ${listings} listed for sale` });
     await w.sendWaiting();
     return { account: name, names: out };
   } finally {
