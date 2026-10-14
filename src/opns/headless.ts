@@ -270,11 +270,13 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
   const want = new Set(o.names.map((n) => n.trim().toLowerCase()).filter(Boolean));
   const out: { name: string; action: string; txid?: string; error?: string }[] = [];
   try {
-    const r = await listOpns.execute(ctx, { includeTags: true, limit: 10_000 });
+    // Per-name lookups, as listedIn does: the unfiltered list leaves listings out.
+    const outputs = [];
+    for (const nm of want) outputs.push(...(await listOpns.execute(ctx, { names: [nm], includeTags: true, limit: 50 })).outputs);
     const seen = new Set<string>();
-    for (const o2 of r.outputs) {
+    for (const o2 of outputs) {
       const nm = o2.tags?.find((t) => t.startsWith('name:'))?.slice(5) ?? '';
-      if (!want.has(nm) || !o2.tags?.some((t) => t.startsWith('ordlock'))) continue;
+      if (!want.has(nm) || seen.has(nm) || !o2.tags?.some((t) => t.startsWith('ordlock'))) continue;
       seen.add(nm);
       let id = o2.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? o2.outpoint;
       if (o.dryRun) {
