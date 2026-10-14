@@ -262,6 +262,45 @@ export function opnsStatus(account?: string) {
  * Give the owner everything back: unsold listings are cancelled, every name left in the agent wallet is sent to
  * `to`, then (unless namesOnly) the remaining sats are withdrawn to `payTo ?? to`.
  */
+/** Cancel the sale listings of the named OpNS names and send them to `to` (reserved brands/countries/cities: owner, 14 Oct 2026). */
+export async function opnsUnlist(o: { account?: string; names: string[]; to: string; dryRun?: boolean }) {
+  const { name, w } = await brc100Account(accountName(o.account));
+  w.startMonitor();
+  const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
+  const want = new Set(o.names.map((n) => n.trim().toLowerCase()).filter(Boolean));
+  const out: { name: string; action: string; txid?: string; error?: string }[] = [];
+  try {
+    const r = await listOpns.execute(ctx, { includeTags: true, limit: 10_000 });
+    const seen = new Set<string>();
+    for (const o2 of r.outputs) {
+      const nm = o2.tags?.find((t) => t.startsWith('name:'))?.slice(5) ?? '';
+      if (!want.has(nm) || !o2.tags?.some((t) => t.startsWith('ordlock'))) continue;
+      seen.add(nm);
+      let id = o2.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? o2.outpoint;
+      if (o.dryRun) {
+        out.push({ name: nm, action: 'would unlist and send' });
+        continue;
+      }
+      try {
+        const c = await cancelOpnsListing.execute(ctx, { id });
+        if (c.error) throw new Error(String(c.error));
+        out.push({ name: nm, action: 'unlisted', txid: c.txid });
+        id = (await opnsIdFor(ctx, nm)) ?? id;
+        const s = await sendOpns.execute(ctx, { id, address: o.to });
+        if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
+        out.push({ name: nm, action: 'sent', txid: s.txid });
+        appendLog(name, { at: Date.now(), action: 'opns-unlist', detail: `${nm} → ${o.to} ${s.txid}`, usd: 0 });
+      } catch (e) {
+        out.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    for (const nm of want) if (!seen.has(nm)) out.push({ name: nm, action: 'not listed here' });
+    await w.sendWaiting();
+    return { account: name, names: out };
+  } finally {
+    await w.close();
+  }
+}
 export async function opnsSweep(o: { account?: string; to: string; payTo?: string; namesOnly?: boolean; keepListed?: boolean }) {
   const { name, b, w } = await brc100Account(accountName(o.account));
   w.startMonitor();

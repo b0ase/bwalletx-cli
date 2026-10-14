@@ -490,6 +490,24 @@ opns
     }),
   );
 opns
+  .command('unlist <to>')
+  .description('cancel the sale listings of the names in --file and send them to <to> (reserved names)')
+  .requiredOption('--file <path>', 'text file, one name per line')
+  .option('-a, --account <name>', 'agent account')
+  .option('-y, --yes', 'no confirmation prompt')
+  .option('--dry-run', 'show what would happen, change nothing')
+  .action(
+    run(async (to: string, o: { file: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
+      const { readFileSync } = await import('node:fs');
+      const names = readFileSync(o.file, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+      if (!o.dryRun && !o.yes && !process.env.BWALLETX_YES && !(await confirm(`Cancel listings for up to ${names.length} names and send them to ${to}?`))) return console.log('Cancelled.');
+      const { opnsUnlist } = await import('./opns/headless.js');
+      const r = await opnsUnlist({ account: o.account, names, to, dryRun: o.dryRun });
+      for (const n of r.names) console.log(n.txid ? `${n.name}: ${n.action} ${n.txid}` : n.error ? `${n.name}: FAILED ${n.error}` : `${n.name}: ${n.action}`);
+      if (r.names.some((n) => n.action === 'failed')) process.exitCode = 1;
+    }),
+  );
+opns
   .command('sweep')
   .description('give it all back: cancel unsold listings, send every name in the agent wallet to --to, withdraw the remaining sats')
   .option('-a, --account <name>', 'agent account')
