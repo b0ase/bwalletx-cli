@@ -29,6 +29,8 @@ export type AccountConfig = {
   approveAboveUsd?: number | null;
   /** The account's BRC-100 identity public key (compressed hex), derived at import. Public, safe to print. */
   identityKey?: string;
+  /** The pay key's public key (compressed hex), derived at import. Public; lets a site record the receive address as proven. */
+  payPubkey?: string;
   stopped: boolean;
   importedAt: number;
 };

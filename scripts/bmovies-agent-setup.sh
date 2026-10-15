@@ -11,7 +11,7 @@
 #   2. `bwalletx key new bmovies`: three new keys, encrypted with a passphrase YOU type (asked twice, never stored,
 #      never on the command line). The encrypted key file stays on this server only (mode 600).
 #   3. Daily cap £1 (as $1.30) and owner approval for any single spend over 10p (as $0.13).
-#   4. Prints ONLY the public identity key and the receive (pay) address. Send those to Claude.
+#   4. Prints ONLY public values: the identity key, the receive (pay) address and its public key. Send those to Claude.
 #
 # It never prints, copies or uploads a private key. It refuses to run if a "bmovies" account already exists.
 # Back up /opt/bmovies-agent/bmovies.key.json (it is encrypted) somewhere offline; without it and the
@@ -68,9 +68,9 @@ bwx cap bmovies "$CAP_USD" >/dev/null
 bwx approve-above bmovies "$APPROVE_ABOVE_USD" >/dev/null
 
 echo
-echo "Done. Send these two PUBLIC values to Claude (nothing else):"
-bwx --json key info bmovies | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const i=JSON.parse(s);console.log("  identity key:    "+i.identityKey);console.log("  receive address: "+i.payAddress)})' 2>/dev/null \
-  || bwx key info bmovies | grep -E 'identity key|pay address'
+echo "Done. Send these three PUBLIC values to Claude (nothing else):"
+bwx --json key info bmovies | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const i=JSON.parse(s);console.log("  identity key:    "+i.identityKey);console.log("  receive address: "+i.payAddress);console.log("  receive pubkey:  "+i.payPubkey)})' 2>/dev/null \
+  || bwx key info bmovies | grep -E 'identity key|pay address|pay pubkey'
 echo
 echo "Cap: \$$CAP_USD/day (£1). Owner approval above \$$APPROVE_ABOVE_USD (10p)."
 echo "Back up $AGENT_DIR/bmovies.key.json (encrypted) offline. Do not share the passphrase."
