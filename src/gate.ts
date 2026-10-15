@@ -58,6 +58,9 @@ export const evaluateGate = ({ account, stopAll, log, loaded, book, action: a, e
     now,
   );
   if (!acct.ok) return refuse(acct.reason, acct.reason.startsWith('Over today') ? 'dailyCap' : 'stop');
+  // Bigger spends wait for the owner (bAgents approvals). Paper fills never need it.
+  const limit = account?.approveAboveUsd;
+  if (!paper && limit != null && a.usd > limit) return refuse(`Needs owner approval: over $${limit} per action`, 'approval');
   if (rateLimited(log, now)) return refuse(`Rate limit: at most ${RATE_LIMIT_PER_HOUR} spending actions per hour`, 'rateLimit');
   if (!loaded) return { ok: true, paper: false };
 

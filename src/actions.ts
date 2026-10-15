@@ -67,6 +67,9 @@ export async function importKey(file: string, passphrase?: string) {
     payAddress: addressOf(keys.payPk),
     ordAddress: addressOf(keys.ordPk),
     dailyCapUsd: prev?.dailyCapUsd ?? null,
+    approveAboveUsd: prev?.approveAboveUsd ?? null,
+    identityKey: PrivateKey.fromWif(keys.identityPk).toPublicKey().toString(),
+    payPubkey: PrivateKey.fromWif(keys.payPk).toPublicKey().toString(),
     stopped: prev?.stopped ?? false,
     importedAt: prev?.importedAt ?? Date.now(),
   };
