@@ -33,6 +33,22 @@ describe('gate order: stop → daily cap → rate limit → rules', () => {
     expect(evaluateGate(input({ account: a, log: [spend(NOW - 10, 5)], loaded: loaded('paper') })).ok).toBe(true);
   });
 
+  test('owner approval threshold refuses bigger live spends, after the cap', () => {
+    const a = acct({ dailyCapUsd: 1.3, approveAboveUsd: 0.13 });
+    expect(evaluateGate(input({ account: a, action: { kind: 'send', token: 'BSV', usd: 0.1, to: '1X' } })).ok).toBe(true);
+    expect(evaluateGate(input({ account: a, action: { kind: 'send', token: 'BSV', usd: 0.5, to: '1X' } })))
+      .toMatchObject({ ok: false, rule: 'approval', logEntry: { action: 'refused', rule: 'approval', usd: 0 } });
+    // exactly at the threshold is allowed
+    expect(evaluateGate(input({ account: a, action: { kind: 'send', token: 'BSV', usd: 0.13, to: '1X' } })).ok).toBe(true);
+    // the daily cap still wins first
+    expect(evaluateGate(input({ account: a, log: [spend(NOW - 10, 1.25)], action: { kind: 'send', token: 'BSV', usd: 0.1, to: '1X' } })))
+      .toMatchObject({ rule: 'dailyCap' });
+    // paper fills never need approval
+    expect(evaluateGate(input({ account: a, loaded: loaded('paper'), action: { kind: 'buy', token: 'ABC', usd: 1, priceUsd: 0.1 } })).ok).toBe(true);
+    // no threshold set: only the cap applies
+    expect(evaluateGate(input({ account: acct({ approveAboveUsd: null }), action: { kind: 'buy', token: 'ABC', usd: 50, priceUsd: 0.1 } })).ok).toBe(true);
+  });
+
   test('strategy rules refuse with the rule name and a log entry', () => {
     const r = evaluateGate(input({ loaded: loaded('live', rules({ buyBelowUsd: 0.05 })) }));
     expect(r).toMatchObject({ ok: false, rule: 'buyBelowUsd', logEntry: { action: 'refused', rule: 'buyBelowUsd', usd: 0 } });

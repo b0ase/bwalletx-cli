@@ -88,7 +88,34 @@ key
     run(async (name: string, o: { out: string }) => {
       const out = o.out === '<name>.key.json' ? `${name}.key.json` : o.out;
       const a = await act.newKey(name, out, process.env.BWALLETX_PASSPHRASE || undefined);
-      print(a, () => `Made "${a.name}"\n  pay address: ${a.payAddress}\n  ord address: ${a.ordAddress}\n  key file: ${out} (keep it; it is the only copy of these keys)\n  stored: ${keyFilePath(a.name)} (encrypted, mode 600)`);
+      print(a, () => `Made "${a.name}"\n  identity key: ${a.identityKey}\n  pay address: ${a.payAddress}\n  ord address: ${a.ordAddress}\n  key file: ${out} (keep it; it is the only copy of these keys)\n  stored: ${keyFilePath(a.name)} (encrypted, mode 600)`);
+    }),
+  );
+
+key
+  .command('info <account>')
+  .description('public details only: identity key, pay and ord addresses, cap and approval threshold')
+  .action(
+    run((name: string) => {
+      const a = resolveAccount(name);
+      const info = {
+        name: a.name,
+        identityKey: a.identityKey ?? null,
+        payAddress: a.payAddress,
+        ordAddress: a.ordAddress,
+        dailyCapUsd: a.dailyCapUsd,
+        approveAboveUsd: a.approveAboveUsd ?? null,
+      };
+      print(info, () =>
+        [
+          `${a.name}`,
+          `  identity key: ${info.identityKey ?? '(re-import the key file to record it)'}`,
+          `  pay address: ${a.payAddress}`,
+          `  ord address: ${a.ordAddress}`,
+          `  daily cap: ${a.dailyCapUsd ? `$${a.dailyCapUsd}` : 'none'}`,
+          `  owner approval above: ${info.approveAboveUsd != null ? `$${info.approveAboveUsd}` : 'none'}`,
+        ].join('\n'),
+      );
     }),
   );
 
@@ -118,6 +145,19 @@ program
       c.defaultAccount = name;
       writeConfig(c);
       console.log(`Default account: ${name}`);
+    }),
+  );
+
+program
+  .command('approve-above <account> <usd>')
+  .description('refuse single spends above this many USD until the owner approves them ("off" to clear)')
+  .action(
+    run((name: string, v: string) => {
+      resolveAccount(name);
+      const t = v === 'off' ? null : Number(v);
+      if (t !== null && !(t >= 0)) throw new Error('Threshold must be a number of USD (0 or more) or "off"');
+      updateAccount(name, { approveAboveUsd: t });
+      console.log(t !== null ? `${name}: spends over $${t} need owner approval` : `${name}: no approval threshold`);
     }),
   );
 

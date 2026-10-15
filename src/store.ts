@@ -22,6 +22,13 @@ export type AccountConfig = {
   ordAddress: string;
   /** Per-account daily cap in USD; null = none (the balance is the limit). */
   dailyCapUsd: number | null;
+  /**
+   * Spends above this many USD are refused with rule "approval": the owner approves them in bAgents.
+   * null/absent = no threshold (only the daily cap applies).
+   */
+  approveAboveUsd?: number | null;
+  /** The account's BRC-100 identity public key (compressed hex), derived at import. Public, safe to print. */
+  identityKey?: string;
   stopped: boolean;
   importedAt: number;
 };
