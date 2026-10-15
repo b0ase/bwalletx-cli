@@ -14,6 +14,7 @@ import { bsvUsd } from '../market.js';
 import { allStopped, appendLog, home, readConfig } from '../store.js';
 import {
   buildQueue,
+  HEARTBEAT_MS,
   mergeState,
   newState,
   parseNameList,
@@ -27,6 +28,7 @@ import {
 import { benchmark, getThreads, setThreads } from './miner.js';
 import { estimateMintFee, fetchMineNode } from './opnsMint.js';
 import { mineName } from './opnsRegister.js';
+import { appendLedger, ledgerNames, ownerCheck } from './opnsOwner.js';
 import { fileKV, OpnsTree } from './opnsTree.js';
 import { indexerFetch } from './services.js';
 
@@ -105,6 +107,17 @@ export const prepare = (o: {
   return { account, state, invalid };
 };
 
+/** The toolbox has no timeout of its own: a stuck provider socket used to hang the whole run silently. */
+const BEEF_TIMEOUT_MS = 60_000;
+export const withTimeout = <T>(p: Promise<T>, ms: number, what: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${what}: timed out after ${ms / 1000} s`)), ms);
+    p.then(
+      (v) => (clearTimeout(t), resolve(v)),
+      (e) => (clearTimeout(t), reject(e)),
+    );
+  });
+
 /** Toolbox (CommonJS) services for node BEEF, converted to the ESM SDK the OpNS code uses. */
 const require = createRequire(import.meta.url);
 const oneSatServices = () => {
@@ -115,7 +128,7 @@ const oneSatServices = () => {
     getBeefForTxid: async (txid: string) => {
       for (let i = 1; ; i++) {
         try {
-          return Beef.fromBinary((await s.getBeefForTxid(txid)).toBinary());
+          return Beef.fromBinary((await withTimeout(s.getBeefForTxid(txid), BEEF_TIMEOUT_MS, `BEEF for ${txid}`)).toBinary());
         } catch (e) {
           if (i >= 5) throw e;
           await new Promise((r) => setTimeout(r, 10_000 * i));
@@ -201,11 +214,27 @@ export async function opnsMint(o: MintOptions): Promise<RunResult> {
   const runStart = Date.now();
   let lastLine = 0;
   const tty = process.stdout.isTTY && !o.quiet;
+  // Every wait says what it is waiting for on its own line (the progress line above it keeps updating in place).
+  let lastLog = Date.now();
+  let doing = 'starting';
+  const log = (msg: string) => {
+    lastLog = Date.now();
+    if (o.quiet) return;
+    const stamp = new Date().toTimeString().slice(0, 8);
+    if (tty) process.stdout.write(`\r\x1b[2K${stamp} ${msg}\n`);
+    else console.log(`${stamp} ${msg}`);
+  };
+  // Anything that blocks without a loud wait of its own (a wallet call, a provider socket) still shows up.
+  const heartbeat = setInterval(() => {
+    if (Date.now() - lastLog >= HEARTBEAT_MS) log(`Still working: ${doing} (no news for ${Math.round((Date.now() - lastLog) / 1000)} s)`);
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
   try {
     const res = await runHeadless(
       {
         fetch: f,
-        mine: (n, lockTo, signal, onProgress) => mineName({ ctx, fetch: f, tree, lockTo }, n, signal, onProgress),
+        mine: (n, lockTo, signal, onProgress) => mineName({ ctx, fetch: f, tree, lockTo, log }, n, signal, onProgress),
+        log,
         list: async (n, sats) => {
           const id = await opnsIdFor(ctx, n);
           if (!id) throw new Error(`"${n}" not found in the agent wallet`);
@@ -230,12 +259,29 @@ export async function opnsMint(o: MintOptions): Promise<RunResult> {
           return d.length ? n.length - Math.max(...d.map((x) => x.length)) : null;
         },
         isOurs: (n) => tree.isOurs(n),
+        // "Ours" = our records (the shared ledger + every miner state here) or this account's BRC-100 wallet, never
+        // addresses (bWalletX locks each name to a fresh derived address).
+        takenOwner: ownerCheck({
+          fetch: f,
+          ledger: () => ledgerNames(home()),
+          inWallet: async (n) => !!(await opnsIdFor(ctx, n)) || (await listedIn(ctx, n)),
+        }),
+        onMinted: (n) => {
+          try {
+            appendLedger(home(), [n], `minted by ${name}`);
+          } catch {
+            /* the ledger is a convenience; never stop a run over it */
+          }
+        },
         balance: () => b.walletBalance(w),
         stopped: () => allStopped() || !!readConfig().accounts[name]?.stopped,
         perCharSats: PER_CHAR_SATS,
         listFeeSats: LIST_FEE_SATS,
         save: (s) => saveState(s),
         onUpdate: (s, p) => {
+          const cur = s.items.find((it) => it.status === 'mining');
+          doing = p ? `${p.phase} "${p.name}" (${p.domain || '…'})` : cur ? `"${cur.name}"${cur.note ? `: ${cur.note.slice(0, 100)}` : ''}` : 'between names';
+          if (p?.phase === 'mining') lastLog = Date.now(); // hashing is visible progress
           if (o.quiet) return;
           const now = Date.now();
           if (p && now - lastLine < 500) return;
@@ -248,6 +294,7 @@ export async function opnsMint(o: MintOptions): Promise<RunResult> {
       state,
       ctl.signal,
     );
+    clearInterval(heartbeat);
     saveState(res.state, true);
     if (tty) process.stdout.write('\n');
     for (const it of res.state.items)

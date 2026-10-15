@@ -76,6 +76,9 @@ export type RegisterDeps = {
    * this wallet. Undefined = the wallet's own ordinal key, exactly as in bWalletX.
    */
   lockTo?: (newDomain: string) => string | undefined;
+  /** CLI: one-line notes about what the minter is doing (ghost nodes dropped, …). */
+  log?: (msg: string) => void;
+  now?: () => number;
 };
 
 const errText = (e: unknown) => {
@@ -86,14 +89,14 @@ const errText = (e: unknown) => {
 export const isDoubleSpend = (e: unknown) =>
   /double|spent|conflict|missing.?inputs|DOUBLE_SPEND|SEEN_IN_ORPHAN|REVIEW_ACTIONS|require review/i.test(errText(e));
 
-type Start = { outpoint: string; domain: string; beefHint?: number[]; fromIndexer: boolean };
+type Start = { outpoint: string; domain: string; beefHint?: number[]; fromIndexer: boolean; txid?: string; at?: number };
 
 /** Deepest unspent node for `name`: our own cached node when it is at least as deep as the indexer's. */
 const pickNode = (tree: OpnsTree | undefined, name: string, indexed: MineNode | null): Start | null => {
   const local = tree?.best(name) ?? null;
   const idx = indexed && !tree?.isSpent(indexed.outpoint) ? indexed : null;
   if (local && (!idx || local.domain.length >= idx.domain.length))
-    return { outpoint: local.outpoint, domain: local.domain, beefHint: tree?.beefFor(local), fromIndexer: false };
+    return { outpoint: local.outpoint, domain: local.domain, beefHint: tree?.beefFor(local), fromIndexer: false, txid: local.txid, at: local.at };
   if (idx) return { outpoint: idx.outpoint, domain: idx.domain, fromIndexer: true };
   return null;
 };
@@ -130,6 +133,17 @@ export const followForward = async (f: Fetch, outpoint: string, maxHops = 60): P
     hop++;
   }
   return `${txid}.${vout}`;
+};
+
+/** Load errors meaning the providers have never heard of the tx. */
+export const isUnknownTx = (msg: string) => /must be valid transaction|unknown tx|not found|404/i.test(msg);
+/** A cached node older than this that the chain doesn't know is a ghost, not lag. */
+export const GHOST_MS = 30 * 60_000;
+
+/** True only on a clear 404 from WhatsOnChain (a 429 / network error is "don't know", never "ghost"). */
+export const txMissing = async (f: Fetch, txid: string) => {
+  const r = await f(`${WOC}/tx/hash/${txid}`).catch(() => null);
+  return r?.status === 404;
 };
 
 const catchingUp = (name: string) =>
@@ -171,10 +185,40 @@ export const mineName = async (
   let beefHint = first.beefHint;
   let fromIndexer = first.fromIndexer; // the node came from the overlay (vs our own fresh/cached child)
   let retries = 0;
+  // The cached start node, while we are still on it: if the chain has never seen its tx it is a ghost.
+  let cached: Start | null = first.fromIndexer ? null : first;
+  let ghosts = 0;
+  const now = deps.now ?? Date.now;
 
   while (true) {
     if (signal.aborted) throw new MiningCancelled();
-    const node = await load(deps.ctx, outpoint, beefHint);
+    let node: LoadedNode;
+    try {
+      node = await load(deps.ctx, outpoint, beefHint);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const c = cached;
+      if (!c?.txid || !tree || c.outpoint !== outpoint || ghosts >= 5 || !isUnknownTx(msg)) throw e;
+      if (now() - (c.at ?? now()) < GHOST_MS || !(await txMissing(deps.fetch, c.txid))) throw e;
+      deps.log?.(`Cached node "${c.domain}" (${c.txid.slice(0, 12)}…) never reached the chain: dropping it and starting from the indexer`);
+      tree.forget(c.txid);
+      ghosts++;
+      const next = pickNode(tree, name, await fetchMineNode(deps.fetch, name));
+      if (!next) throw new Error(catchingUp(name));
+      outpoint = next.outpoint;
+      beefHint = next.beefHint;
+      fromIndexer = next.fromIndexer;
+      cached = next.fromIndexer ? null : next;
+      if (next.fromIndexer) {
+        const head = await followForward(deps.fetch, next.outpoint);
+        if (head !== next.outpoint) {
+          tree.markSpent(next.outpoint);
+          outpoint = head;
+        }
+      }
+      continue;
+    }
+    cached = null;
     const domain = node.state.domain;
     if (!name.startsWith(domain)) throw new Error(`Tree node "${domain}" isn't a prefix of "${name}"`);
     if (domain === name) break;

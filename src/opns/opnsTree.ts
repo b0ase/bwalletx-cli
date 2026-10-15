@@ -89,6 +89,26 @@ export class OpnsTree {
     this.save();
   }
 
+  /**
+   * A cached node whose transaction never reached the chain (dropped by the broadcaster, or its own parent was a
+   * ghost). Every name under that prefix failed "must be valid transaction on chain" for ever (15 Oct 2026: "per"
+   * and "tall" ghosts stalled the bulk run for 17 hours). Drop every node and name from that tx, and un-mark the
+   * outpoint it claimed to spend (record() stamps that spend with the node's own `at`), so the indexer's node is
+   * usable again.
+   */
+  forget(txid: string) {
+    const gone = Object.entries(this.s.nodes).filter(([, n]) => n.txid === txid);
+    if (!gone.length) return false;
+    const stamps = new Set(gone.map(([, n]) => n.at));
+    for (const [d, n] of gone) {
+      delete this.s.nodes[d];
+      if (this.s.names[d] === n.at) delete this.s.names[d];
+    }
+    for (const [op, at] of Object.entries(this.s.spent)) if (stamps.has(at) && !op.startsWith(txid)) delete this.s.spent[op];
+    this.save();
+    return true;
+  }
+
   /** A name we minted recently (maybe still unconfirmed): ours / in progress, never "free". */
   isOurs(name: string) {
     return name in this.s.names;
