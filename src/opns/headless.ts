@@ -28,6 +28,7 @@ import {
 import { benchmark, getThreads, setThreads } from './miner.js';
 import { estimateMintFee, fetchMineNode } from './opnsMint.js';
 import { mineName } from './opnsRegister.js';
+import { appendLedger, ledgerNames, ownerCheck } from './opnsOwner.js';
 import { fileKV, OpnsTree } from './opnsTree.js';
 import { indexerFetch } from './services.js';
 
@@ -258,6 +259,20 @@ export async function opnsMint(o: MintOptions): Promise<RunResult> {
           return d.length ? n.length - Math.max(...d.map((x) => x.length)) : null;
         },
         isOurs: (n) => tree.isOurs(n),
+        // "Ours" = our records (the shared ledger + every miner state here) or this account's BRC-100 wallet, never
+        // addresses (bWalletX locks each name to a fresh derived address).
+        takenOwner: ownerCheck({
+          fetch: f,
+          ledger: () => ledgerNames(home()),
+          inWallet: async (n) => !!(await opnsIdFor(ctx, n)) || (await listedIn(ctx, n)),
+        }),
+        onMinted: (n) => {
+          try {
+            appendLedger(home(), [n], `minted by ${name}`);
+          } catch {
+            /* the ledger is a convenience; never stop a run over it */
+          }
+        },
         balance: () => b.walletBalance(w),
         stopped: () => allStopped() || !!readConfig().accounts[name]?.stopped,
         perCharSats: PER_CHAR_SATS,

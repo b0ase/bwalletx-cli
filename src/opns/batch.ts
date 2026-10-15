@@ -14,6 +14,7 @@
  * Pure logic here (testable with mocks); the wallet and network glue is in headless.ts.
  */
 import { MiningCancelled, NameTakenError, type Progress } from './opnsRegister.js';
+import type { OwnerVerdict } from './opnsOwner.js';
 import { EXPECTED_HASHES } from './opnsPow.js';
 import { isTaken, OPNS_CHARSET } from './opnsMint.js';
 import type { Fetch } from './services.js';
@@ -243,6 +244,13 @@ export type RunDeps = {
   charsNeeded: (name: string) => Promise<number | null>;
   /** Ours already (minted earlier, maybe unconfirmed): never mined twice. */
   isOurs: (name: string) => boolean;
+  /**
+   * A name that looks taken: is it ours? 'ours' = our records (ledger / wallet) say we minted it, 'theirs' = a
+   * pre-2024 holder, 'unverified' = can't tell. Optional; without it every taken name is skipped as before.
+   */
+  takenOwner?: (name: string) => Promise<OwnerVerdict>;
+  /** Called after a name is minted (append it to the shared "ours" ledger). */
+  onMinted?: (name: string) => void;
   /** Spendable sats in the agent account (stop before a name it can't pay for). */
   balance?: () => Promise<number>;
   /** Kill switch (bwalletx stop / account stopped). */
@@ -382,6 +390,17 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
     set(i, { listed: false, note: `Not listed: ${lastErr}` });
   };
 
+  /**
+   * The name looks taken. Our records say we minted it → 'mine'; otherwise 'skipped', "someone else" only for a
+   * pre-2024 holder, else "unverified owner". A name minted elsewhere isn't listed from here (not in this wallet).
+   */
+  const markTaken = async (i: number) => {
+    if (!deps.takenOwner) return set(i, { status: 'skipped', note: 'Taken by someone else' });
+    const v = await deps.takenOwner(state.items[i].name).catch(() => 'unverified' as const);
+    if (v === 'ours') return set(i, { status: 'mine', note: 'Already yours (in your names ledger / wallet)' });
+    set(i, { status: 'skipped', note: v === 'theirs' ? 'Taken by someone else (held since before 2024)' : 'Taken (unverified owner)' });
+  };
+
   deps.onUpdate(state);
   // Names that failed on a hold ("still catching up": our own unconfirmed mint holds the prefix node) or on a
   // parent the indexer hasn't seen yet clear within a block or two. Re-try them in the same run once
@@ -422,7 +441,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           break;
         }
         if (await isTaken(deps.fetch, it.name)) {
-          set(i, { status: 'skipped', note: 'Taken by someone else' });
+          await markTaken(i);
           break;
         }
         const chars = (await deps.charsNeeded(it.name)) ?? it.name.length;
@@ -452,7 +471,10 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
             charsTotal: state.charsTotal + steps.length,
           },
         );
-        if (steps.length) await listOne(i);
+        if (steps.length) {
+          deps.onMinted?.(it.name);
+          await listOne(i);
+        }
         failedInARow = 0;
         hardInARow = 0;
         break;
@@ -462,7 +484,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           return end('cancelled');
         }
         if (e instanceof NameTakenError) {
-          set(i, { status: 'skipped', note: 'Taken by someone else' });
+          await markTaken(i);
           break;
         }
         const msg = e instanceof Error ? e.message : String(e);
