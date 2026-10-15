@@ -253,6 +253,25 @@ export type RunDeps = {
   onUpdate: (s: State, p?: Progress & { name: string }) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** A line saying what the run is waiting for; called at least every HEARTBEAT_MS during every wait. */
+  log?: (msg: string) => void;
+};
+
+/** How often a wait says what it is waiting for. */
+export const HEARTBEAT_MS = 30_000;
+
+/** Sleep `ms`, saying `what` (with the time left) every HEARTBEAT_MS. Returns early on abort. */
+export const loudSleep = async (
+  sleep: (ms: number) => Promise<void>,
+  ms: number,
+  what: string,
+  signal: AbortSignal,
+  log?: (msg: string) => void,
+) => {
+  for (let left = ms; left > 0 && !signal.aborted; left -= HEARTBEAT_MS) {
+    log?.(`${what} (${Math.ceil(left / 1000)} s left)`);
+    await sleep(Math.min(HEARTBEAT_MS, left));
+  }
 };
 
 export type RunResult = { stopped: 'finished' | 'cancelled' | 'budget' | 'funds' | 'killed' | 'error'; error?: string; state: State };
@@ -286,6 +305,7 @@ export const waitForNextBlock = async (
   signal: AbortSignal,
   maxMs = BLOCK_WAIT_MAX_MS,
   pollMs = BLOCK_POLL_MS,
+  log?: (msg: string) => void,
 ): Promise<boolean> => {
   const height = async () => {
     const r = await f(`${WOC}/chain/info`).catch(() => null);
@@ -294,6 +314,7 @@ export const waitForNextBlock = async (
   };
   const start = await height();
   for (let waited = 0; waited < maxMs && !signal.aborted; waited += pollMs) {
+    log?.(`Waiting for the next block (height ${start ?? '?'}, ${Math.round(waited / 60_000)} of ${Math.round(maxMs / 60_000)} min)`);
     await sleep(pollMs);
     const h = await height();
     if (start === null || (h !== null && h > start)) return true;
@@ -343,6 +364,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
     let lastErr = '';
     for (let attempt = 0; attempt <= LIST_RETRIES; attempt++) {
       if (attempt > 0) {
+        deps.log?.(`Listing "${it.name}" failed (${lastErr}); trying again in ${(LIST_RETRY_MS * attempt) / 1000} s`);
         await sleep(LIST_RETRY_MS * attempt);
         if (signal.aborted) return;
         if (await deps.isListed(it.name).catch(() => false)) return set(i, { listed: true, note: 'Already listed' });
@@ -446,7 +468,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         const msg = e instanceof Error ? e.message : String(e);
         if (isDepthLimit(msg) && depthWaits++ < DEPTH_WAITS) {
           set(i, { status: 'pending', note: `Waiting for the next block: ${msg}` });
-          await waitForNextBlock(deps.fetch, sleep, signal);
+          await waitForNextBlock(deps.fetch, sleep, signal, undefined, undefined, deps.log);
           if (signal.aborted) return end('cancelled');
           continue;
         }
@@ -455,7 +477,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         const catching = /still catching up/i.test(msg);
         if (isTransient(msg) && attempt++ < (catching ? 2 : NAME_RETRIES)) {
           set(i, { status: 'pending', note: `Retrying after: ${msg}` });
-          await sleep(catching ? 10_000 * attempt : NAME_RETRY_MS * attempt);
+          await loudSleep(sleep, catching ? 10_000 * attempt : NAME_RETRY_MS * attempt, `"${it.name}" retry ${attempt} after: ${msg.slice(0, 120)}`, signal, deps.log);
           if (signal.aborted) return end('cancelled');
           continue;
         }
@@ -463,6 +485,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         // the next run retries it. Ten failures in a row means something systemic: stop then (14 Oct 2026: a
         // "still catching up" on one name used to end the whole night's run).
         set(i, { status: 'error', note: msg });
+        deps.log?.(`"${it.name}" failed, moving on: ${msg.slice(0, 160)}`);
         if (isRevisitable(msg) && (revisits.get(i) ?? 0) < REVISITS) failedAt.set(i, now());
         if (!isRevisitable(msg)) hardInARow++;
         if (++failedInARow >= 10) {
@@ -470,7 +493,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           // not breakage: wait for a block and carry on (14 Oct 2026: cyprus streak stopped the run at 887).
           if (hardInARow === 0 && blockPauses++ < BLOCK_PAUSES) {
             set(i, { status: 'error', note: `${msg} (pausing for the next block)` });
-            await waitForNextBlock(deps.fetch, sleep, signal);
+            await waitForNextBlock(deps.fetch, sleep, signal, undefined, undefined, deps.log);
             if (signal.aborted) return end('cancelled');
             failedInARow = 0;
             hardInARow = 0;
