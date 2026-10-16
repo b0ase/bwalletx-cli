@@ -74,7 +74,7 @@ bwalletx buy <tokenId> --max-usd 2 --account trader
 bwalletx list <outpoint> --price 50000 -a trader  # list an ordinal / OpNS name / BSV-21 output on the 1Sat order book
 bwalletx unlist <outpoint> -a trader              # cancel it; the item comes back to the wallet
 bwalletx listings -a trader                       # your open listings, price and live status
-bwalletx buy <listing outpoint> -a trader         # buy one listing (ordinal or BSV-21) by outpoint
+bwalletx buy-listing <outpoint> -a trader         # buy one listing (ordinal or BSV-21) by outpoint
 bwalletx strategy load ./accumulator.json --account trader          # paper ($100 pretend book)
 bwalletx strategy load ./accumulator.json --account trader --live   # real money
 bwalletx strategy show | unload
@@ -178,7 +178,7 @@ a synthetic funding coin, without touching your account or broadcasting.
 bwalletx list <outpoint> --price <sats> [--amount <n>] [-a account] [--yes] [--dry-run]
 bwalletx unlist <outpoint> [-a account] [--yes] [--dry-run]
 bwalletx listings [-a account]
-bwalletx buy <listing outpoint> [-a account] [--yes] [--dry-run]
+bwalletx buy-listing <outpoint> [--max-usd <n>] [-a account] [--yes] [--dry-run]
 ```
 
 These run on a key-file account's own **BRC-100 wallet** (the same local wallet `opns` and `brc100` use; fund it
@@ -195,12 +195,12 @@ by the same `@1sat/actions` code the bWalletX app uses:
   `cancelOpnsListing`) or a recorded BSV-21 listing (signed with its cancel key). The item returns to the wallet.
 - `listings`: OrdLock outputs in the wallet plus recorded BSV-21 listings, with price and `live` / `gone`
   (sold or cancelled) from the 1Sat index.
-- `buy <listing outpoint>`: decodes the listing (v1 or v2, ordinal or BSV-21) and buys it with `buyOrdinal` /
-  `buyBsv21`: the seller price, plus the 1% bWalletX market fee, plus the overlay fee for tokens. Without
-  `--max-usd`, `buy` treats its argument as a listing outpoint; with `--max-usd` it keeps the token-id behaviour above.
+- `buy-listing <outpoint>`: decodes the listing (v1 or v2, ordinal or BSV-21) and buys it with `buyOrdinal` /
+  `buyBsv21`: the seller price, plus the 1% bWalletX market fee, plus the overlay fee for tokens. `--max-usd`
+  refuses it if the total is higher. This is a separate command from `buy <tokenId> --max-usd`, which is unchanged.
 
 Every spend asks for confirmation and shows the price and fees. `-y` or `BWALLETX_YES=1` skips the prompt, for
-scripts. Each one passes the gate: `buy` with its full dollar cost, and `list` / `unlist` as a $0 `list` action
+scripts. Each one passes the gate: `buy-listing` with its full dollar cost, and `list` / `unlist` as a $0 `list` action
 (kill switch, rate limit, strategy rules). A paper-mode strategy refuses these commands. `--dry-run` runs the real builder
 against a wallet that records the `createAction` it is asked for and refuses it. You see the inputs and outputs
 it would have made, and nothing is signed or broadcast. A dry run still opens the wallet, so it asks for the passphrase.
@@ -235,7 +235,7 @@ accounts need `BWALLETX_PASSPHRASE` in the MCP env, paired accounts sign on the 
 | `list_for_sale` | list an ordinal / OpNS name / BSV-21 output on the 1Sat order book (OrdLock v2; gated as `list`; `dryRun` builds only) |
 | `unlist` | cancel one of the account's listings (`dryRun` builds only) |
 | `listings` | the account's open listings with price and live status |
-| `buy_listing` | buy one listing by outpoint (+1% market fee; gated as `buy`; optional `maxUsd`; `dryRun` builds only) |
+| `buy_listing` | buy one listing by outpoint, like `buy-listing` (+1% market fee; gated as `buy`; optional `maxUsd`; `dryRun` builds only) |
 | `strategy_show` | the loaded strategy, mode and paper book |
 | `strategy_load` | load a strategy file, always in **paper** mode |
 | `log` | recent activity log entries |

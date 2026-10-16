@@ -1,5 +1,5 @@
 /**
- * Selling and listing from the CLI: `bwalletx list | unlist | listings | buy <listing outpoint>`.
+ * Selling and listing from the CLI: `bwalletx list | unlist | listings | buy-listing <outpoint>`.
  *
  * Every spend goes through the account's own BRC-100 wallet (the CLI's wallet-toolbox store, as `opns` uses),
  * with the @1sat/actions builders the bWalletX app uses:

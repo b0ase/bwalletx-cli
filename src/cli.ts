@@ -223,23 +223,32 @@ program
   );
 
 program
-  .command('buy <id>')
-  .description('buy a BSV-21 token for at most --max-usd (cheapest whole buyable listing), or, without --max-usd, buy the 1Sat listing at outpoint <id> (ordinal or BSV-21). +1% market fee')
-  .option('--max-usd <n>', 'with a token id: most dollars to spend (picks the cheapest listing)')
+  .command('buy <tokenId>')
+  .description('buy a BSV-21 token for at most --max-usd (cheapest whole buyable listing; +1% market fee)')
+  .requiredOption('--max-usd <n>', 'most dollars to spend')
   .option('-a, --account <name>')
   .option('-y, --yes', 'do not ask for confirmation')
-  .option('--dry-run', 'build and verify without broadcasting (token id: throwaway keys and synthetic funding; listing outpoint: built by the wallet, never signed)')
+  .option('--dry-run', 'build and verify against the real listing with throwaway keys and synthetic funding; never broadcasts')
   .action(
-    run(async (id: string, o: { maxUsd?: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
+    run(async (id: string, o: { maxUsd: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
       const skip = o.yes || !!process.env.BWALLETX_YES;
-      if (o.maxUsd === undefined) {
-        const r = await sell.buyListing({ account: o.account, outpoint: id, dryRun: o.dryRun, ...(!skip && { confirm }) });
-        printSell(r);
-        return;
-      }
       const r = await act.buy(id, Number(o.maxUsd.replace(/^\$/, '')), o.account, Date.now(), { dryRun: o.dryRun, ...(!skip && { confirm }) });
       print(r, () => r.text + (r.txid ? `\n  https://whatsonchain.com/tx/${r.txid}` : ''));
       if (!r.ok) process.exitCode = 1;
+    }),
+  );
+
+program
+  .command('buy-listing <outpoint>')
+  .description('buy one 1Sat listing (ordinal or BSV-21) by its outpoint with the account BRC-100 wallet (+1% market fee)')
+  .option('--max-usd <n>', 'refuse if the total with fees is over this')
+  .option('-a, --account <name>', 'agent account (its BRC-100 wallet signs)')
+  .option('-y, --yes', 'do not ask for confirmation')
+  .option('--dry-run', 'build the purchase transaction, sign and broadcast nothing')
+  .action(
+    run(async (outpoint: string, o: { maxUsd?: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
+      const skip = o.yes || !!process.env.BWALLETX_YES;
+      printSell(await sell.buyListing({ account: o.account, outpoint, dryRun: o.dryRun, ...(o.maxUsd !== undefined && { maxUsd: Number(o.maxUsd.replace(/^\$/, '')) }), ...(!skip && { confirm }) }));
     }),
   );
 

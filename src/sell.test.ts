@@ -216,7 +216,7 @@ describe('unlist', () => {
   });
 });
 
-describe('buy <listing outpoint>', () => {
+describe('buy-listing <outpoint>', () => {
   const ordinalListing = () => {
     const tx = new Transaction();
     tx.addOutput({ lockingScript: OrdLockV2.lock(addr(), addr(), 100_000), satoshis: 1 });

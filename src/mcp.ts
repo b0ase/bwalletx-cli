@@ -90,7 +90,7 @@ export async function runMcp(version: string) {
     'buy_listing',
     {
       description:
-        'Buy one 1Sat listing (ordinal or BSV-21) by its outpoint with the account\'s BRC-100 wallet: seller price + 1% bWalletX market fee (+ overlay fee for tokens). Gated like buy; maxUsd refuses anything dearer. dryRun builds only.',
+        'Buy one 1Sat listing (ordinal or BSV-21) by its outpoint with the account\'s BRC-100 wallet, like `bwalletx buy-listing`: seller price + 1% bWalletX market fee (+ overlay fee for tokens). Gated like buy; maxUsd refuses anything dearer. dryRun builds only.',
       inputSchema: { outpoint, maxUsd: z.number().positive().optional(), account, dryRun },
     },
     wrap(async (o: { outpoint: string; maxUsd?: number; account?: string; dryRun?: boolean }) => needPass(o.dryRun) ?? sell.buyListing(o)),
