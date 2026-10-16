@@ -12,6 +12,7 @@ import { z } from 'zod';
 import * as act from './actions.js';
 import * as b1 from './brc100Actions.js';
 import * as mint from './mint.js';
+import * as sell from './sell.js';
 import { allStopped, appendLog, getLoaded, readConfig, resolveAccount, setAllStopped } from './store.js';
 
 const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] });
@@ -62,6 +63,37 @@ export async function runMcp(version: string) {
       if (!paired && getLoaded(name)?.mode !== 'paper' && !process.env.BWALLETX_PASSPHRASE) return { ok: false, text: 'Live buy needs BWALLETX_PASSPHRASE in the MCP server env' };
       return act.buy(tokenId, maxUsd, name);
     }),
+  );
+  const outpoint = z.string().describe('Outpoint, <txid>_<vout>');
+  const dryRun = z.boolean().optional().describe('Build the transaction with the wallet but sign and broadcast nothing');
+  const needPass = (_dry?: boolean) => (!process.env.BWALLETX_PASSPHRASE ? { ok: false, text: 'Needs BWALLETX_PASSPHRASE in the MCP server env (key-file accounts only)' } : null);
+  server.registerTool(
+    'list_for_sale',
+    {
+      description:
+        "List an ordinal, OpNS name or BSV-21 token output from a key-file account's BRC-100 wallet on the 1Sat order book (OrdLock v2), like `bwalletx list`. Gated as a $0 \"list\" action (kill switch, rate limit, strategy rules); paper mode refuses. dryRun builds only. Needs BWALLETX_PASSPHRASE (it opens the wallet, even for dryRun). Paired accounts are refused.",
+      inputSchema: { outpoint, priceSats: z.number().int().positive(), amount: z.string().optional().describe('BSV-21 only: tokens to list from the output (default all)'), account, dryRun },
+    },
+    wrap(async (o: { outpoint: string; priceSats: number; amount?: string; account?: string; dryRun?: boolean }) => needPass(o.dryRun) ?? sell.listForSale(o)),
+  );
+  server.registerTool(
+    'unlist',
+    { description: 'Cancel one of the account\'s 1Sat listings (the item returns to its wallet), like `bwalletx unlist`. Gated like list_for_sale; dryRun builds only.', inputSchema: { outpoint, account, dryRun } },
+    wrap(async (o: { outpoint: string; account?: string; dryRun?: boolean }) => needPass(o.dryRun) ?? sell.unlist(o)),
+  );
+  server.registerTool(
+    'listings',
+    { description: "The account's open 1Sat listings with price and live status (read-only; opens the wallet, so needs BWALLETX_PASSPHRASE).", inputSchema: { account } },
+    wrap(async ({ account: a }: { account?: string }) => needPass() ?? sell.myListings(a)),
+  );
+  server.registerTool(
+    'buy_listing',
+    {
+      description:
+        'Buy one 1Sat listing (ordinal or BSV-21) by its outpoint with the account\'s BRC-100 wallet: seller price + 1% bWalletX market fee (+ overlay fee for tokens). Gated like buy; maxUsd refuses anything dearer. dryRun builds only.',
+      inputSchema: { outpoint, maxUsd: z.number().positive().optional(), account, dryRun },
+    },
+    wrap(async (o: { outpoint: string; maxUsd?: number; account?: string; dryRun?: boolean }) => needPass(o.dryRun) ?? sell.buyListing(o)),
   );
   server.registerTool(
     'strategy_show',

@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@1sat/actions": "0.0.234",
+    "@1sat/client": "0.0.63",
     "@1sat/templates": "0.0.43",
     "@1sat/types": "0.0.52",
     "@bsv/sdk": "^2.8.11",
