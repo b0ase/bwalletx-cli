@@ -120,7 +120,7 @@ export const withTimeout = <T>(p: Promise<T>, ms: number, what: string): Promise
 
 /** Toolbox (CommonJS) services for node BEEF, converted to the ESM SDK the OpNS code uses. */
 const require = createRequire(import.meta.url);
-const oneSatServices = () => {
+export const oneSatServices = () => {
   const toolbox = require('@bsv/wallet-toolbox') as typeof import('@bsv/wallet-toolbox');
   const s = new toolbox.Services('main');
   return {

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { Command } from 'commander';
 import * as act from './actions.js';
 import * as mint from './mint.js';
+import * as sell from './sell.js';
 import * as b1 from './brc100Actions.js';
 import { login, unpair } from './paired.js';
 import { agentRun } from './agent.js';
@@ -234,6 +235,74 @@ program
       const r = await act.buy(id, Number(o.maxUsd.replace(/^\$/, '')), o.account, Date.now(), { dryRun: o.dryRun, ...(!skip && { confirm }) });
       print(r, () => r.text + (r.txid ? `\n  https://whatsonchain.com/tx/${r.txid}` : ''));
       if (!r.ok) process.exitCode = 1;
+    }),
+  );
+
+program
+  .command('buy-listing <outpoint>')
+  .description('buy one 1Sat listing (ordinal or BSV-21) by its outpoint with the account BRC-100 wallet (+1% market fee)')
+  .option('--max-usd <n>', 'refuse if the total with fees is over this')
+  .option('-a, --account <name>', 'agent account (its BRC-100 wallet signs)')
+  .option('-y, --yes', 'do not ask for confirmation')
+  .option('--dry-run', 'build the purchase transaction, sign and broadcast nothing')
+  .action(
+    run(async (outpoint: string, o: { maxUsd?: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
+      const skip = o.yes || !!process.env.BWALLETX_YES;
+      printSell(await sell.buyListing({ account: o.account, outpoint, dryRun: o.dryRun, ...(o.maxUsd !== undefined && { maxUsd: Number(o.maxUsd.replace(/^\$/, '')) }), ...(!skip && { confirm }) }));
+    }),
+  );
+
+const printSell = (r: sell.SellResult) => {
+  print(r, () =>
+    [
+      r.text,
+      ...(r.built ? [`  built: ${r.built.description}`, ...r.built.outputs.map((x, i) => `    out ${i}: ${String(x.satoshis).padStart(9)} sats  ${x.description ?? ''}`)] : []),
+      ...(r.txid ? [`  https://whatsonchain.com/tx/${r.txid}`] : []),
+    ].join('\n'),
+  );
+  if (!r.ok) process.exitCode = 1;
+};
+
+program
+  .command('list <outpoint>')
+  .description('list an ordinal, OpNS name or BSV-21 token output from the account wallet on the 1Sat order book (OrdLock v2)')
+  .requiredOption('--price <sats>', 'asking price in sats (whole listing)')
+  .option('--amount <n>', 'BSV-21 only: list this many tokens from the output (default: all of it)')
+  .option('-a, --account <name>', 'agent account (its BRC-100 wallet signs)')
+  .option('-y, --yes', 'do not ask for confirmation')
+  .option('--dry-run', 'build the listing transaction, sign and broadcast nothing')
+  .action(
+    run(async (outpoint: string, o: { price: string; amount?: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
+      const skip = o.yes || !!process.env.BWALLETX_YES;
+      printSell(await sell.listForSale({ account: o.account, outpoint, priceSats: Number(o.price), amount: o.amount, dryRun: o.dryRun, ...(!skip && { confirm }) }));
+    }),
+  );
+
+program
+  .command('unlist <outpoint>')
+  .description('cancel one of the account\'s listings; the item returns to its wallet')
+  .option('-a, --account <name>', 'agent account')
+  .option('-y, --yes', 'do not ask for confirmation')
+  .option('--dry-run', 'build the cancel transaction, sign and broadcast nothing')
+  .action(
+    run(async (outpoint: string, o: { account?: string; yes?: boolean; dryRun?: boolean }) => {
+      const skip = o.yes || !!process.env.BWALLETX_YES;
+      printSell(await sell.unlist({ account: o.account, outpoint, dryRun: o.dryRun, ...(!skip && { confirm }) }));
+    }),
+  );
+
+program
+  .command('listings')
+  .description('the account\'s open 1Sat listings (wallet OrdLock outputs + BSV-21 listings made here), with live status')
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const r = await sell.myListings(o.account);
+      print(r, () =>
+        r.listings.length
+          ? [`${r.account}: ${r.listings.length} listing(s)`, ...r.listings.map((l) => `  ${l.outpoint}  ${l.kind.padEnd(7)} ${(l.priceSats ?? '?').toLocaleString().padStart(12)} sats  ${usd(l.priceUsd).padStart(8)}  ${l.status.padEnd(7)} ${l.token ? `${l.token.amount} ${l.token.sym ?? l.token.id}` : (l.name ?? '')}`)].join('\n')
+          : `${r.account}: no listings`,
+      );
     }),
   );
 

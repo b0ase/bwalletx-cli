@@ -11,6 +11,9 @@ importers:
       '@1sat/actions':
         specifier: 0.0.234
         version: 0.0.234(@bsv/sdk@2.8.11)(@bsv/wallet-toolbox-client@2.14.7(@bsv/sdk@2.8.11))
+      '@1sat/client':
+        specifier: 0.0.63
+        version: 0.0.63(@bsv/sdk@2.8.11)
       '@1sat/templates':
         specifier: 0.0.43
         version: 0.0.43(@bsv/sdk@2.8.11)
