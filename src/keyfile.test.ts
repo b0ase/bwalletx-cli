@@ -43,3 +43,19 @@ describe('key file', () => {
     expect(() => validateKeyFile({ format: KEYFILE_FORMAT, name: '../evil', identityAddress: '1', enc: {} })).toThrow('name');
   });
 });
+
+describe('import names and relay frames', () => {
+  test('turns an app display name into a CLI account name', async () => {
+    const { cliAccountName } = await import('./actions.js');
+    expect(cliAccountName('trader')).toBe('trader');
+    expect(cliAccountName('My Trader!')).toBe('my-trader');
+    expect(cliAccountName('   ')).toBe('agent');
+    expect(cliAccountName('.hidden')).toBe('hidden');
+  });
+  test('never throws on a bad relay frame', async () => {
+    const { parseFrame } = await import('./paired.js');
+    expect(parseFrame('not json')).toBeNull();
+    expect(parseFrame('42')).toBeNull();
+    expect(parseFrame('{"t":"relay"}')).toEqual({ t: 'relay' });
+  });
+});
