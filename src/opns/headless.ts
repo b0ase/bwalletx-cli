@@ -290,6 +290,12 @@ export async function opnsMint(o: MintOptions): Promise<RunResult> {
         perCharSats: PER_CHAR_SATS,
         listFeeSats: LIST_FEE_SATS,
         save: (s) => saveState(s),
+        onWait: (line) => {
+          doing = line;
+          lastLog = Date.now(); // a timed wait is progress, not a stall
+          if (o.quiet) return;
+          if (tty) process.stdout.write(`\r\x1b[2K${line.slice(0, (process.stdout.columns || 160) - 1)}`);
+        },
         onUpdate: (s, p) => {
           const cur = s.items.find((it) => it.status === 'mining');
           doing = p ? `${p.phase} "${p.name}" (${p.domain || '…'})` : cur ? `"${cur.name}"${cur.note ? `: ${cur.note.slice(0, 100)}` : ''}` : 'between names';
@@ -325,7 +331,7 @@ export function opnsStatus(account?: string) {
   const n = accountName(account);
   const s = loadState(n);
   if (!s) return null;
-  return { account: n, state: statePath(n), report: reportPath(n), stopped: s.stopped, to: s.to, payTo: s.payTo, ...summarise(s), threads: getThreads() };
+  return { account: n, state: statePath(n), report: reportPath(n), stopped: s.stopped, waiting: s.waiting, to: s.to, payTo: s.payTo, ...summarise(s), threads: getThreads() };
 }
 
 /**

@@ -1,5 +1,7 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import {
+  isTreeWait,
+  treeWaitMs,
   buildQueue,
   isTransient,
   mergeState,
@@ -359,5 +361,80 @@ describe('stale proofs after a reorg (16 Oct 2026: "merged Beef failed validatio
     const r = await runHeadless({ ...h.deps, mine: async () => { throw badBeef(); } }, state(['bignumber']), h.ctl.signal);
     expect(r.stopped).toBe('error');
     expect(r.error).toMatch(/orphan|reorg/);
+  });
+});
+
+describe('tree catching up: wait, then retry the same name', () => {
+  test('classifier', () => {
+    const yes = [
+      'The name tree for "seychelles" is still catching up with your last mints. Wait for them to confirm (about 10 minutes), then try again.',
+      'waiting for confirmations',
+      'Unconfirmed parent for input 0',
+      'parent is still unconfirmed',
+      'txn-mempool-conflict: too-long-mempool-chain',
+      'too long mempool chain',
+    ];
+    const no = ['OpNS covenant check failed locally, not broadcast: OP_VERIFY failed', 'Insufficient funds', 'fetch failed', 'Maximum BEEF depth exceeded'];
+    for (const m of yes) expect(isTreeWait(m)).toBe(true);
+    for (const m of no) expect(isTreeWait(m)).toBe(false);
+  });
+  test('backoff 2, 4, 8, then capped at 10 min', () => {
+    expect([0, 1, 2, 3, 9].map(treeWaitMs)).toEqual([120_000, 240_000, 480_000, 600_000, 600_000]);
+  });
+
+  const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  const catching = (name: string) => `The name tree for "${name}" is still catching up with your last mints. Wait for them to confirm (about 10 minutes), then try again.`;
+
+  test('fifteen tree waits in a row do not stop the run; the same name is retried and minted', async () => {
+    vi.useFakeTimers();
+    try {
+      let fails = 15;
+      const waits: string[] = [];
+      const h = harness({ sleep: realSleep, onWait: (l: string) => waits.push(l) });
+      const mine = h.deps.mine;
+      h.deps.mine = async (...a) => {
+        if (fails-- > 0) throw new Error(catching(a[0]));
+        return mine(...a);
+      };
+      const seen: (string | undefined)[] = [];
+      h.deps.save = (s) => seen.push(s.waiting ? `${s.waiting.name}@${s.waiting.since}` : undefined);
+      const p = runHeadless(h.deps, state(['seychelles', 'zed']), h.ctl.signal);
+      await vi.advanceTimersByTimeAsync(2 * 60_000 + 4 * 60_000 + 8 * 60_000 + 12 * 10 * 60_000 + 60_000);
+      const r = await p;
+      expect(r.stopped).toBe('finished');
+      expect(h.minted.map((m) => m.name)).toEqual(['seychelles', 'zed']);
+      expect(r.state.waiting).toBeUndefined();
+      expect(waits[0]).toMatch(/waiting for confirmations… resuming "seychelles" in 02:00/);
+      expect(seen.filter(Boolean)[0]).toMatch(/^seychelles@/);
+      // the "since" stays the start of the first wait across retries
+      expect(new Set(seen.filter(Boolean)).size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('Ctrl-C during a tree wait cancels at once and leaves the name pending', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ sleep: realSleep });
+      h.deps.mine = async (name) => {
+        throw new Error(catching(name));
+      };
+      const p = runHeadless(h.deps, state(['seychelles']), h.ctl.signal);
+      await vi.advanceTimersByTimeAsync(1500);
+      h.ctl.abort();
+      const r = await p;
+      expect(r.stopped).toBe('cancelled');
+      expect(r.state.items[0].status).toBe('pending');
+      expect(r.state.waiting).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('real errors still stop after ten in a row', async () => {
+    const h = harness({ failOn: Array.from({ length: 12 }, (_, k) => `name${k}`) });
+    const r = await runHeadless(h.deps, state(Array.from({ length: 12 }, (_, k) => `name${k}`)), h.ctl.signal);
+    expect(r.error).toMatch(/10 names in a row failed/);
   });
 });

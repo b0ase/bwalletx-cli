@@ -126,6 +126,8 @@ export type State = {
   items: Item[];
   /** Why the last run stopped. */
   stopped?: string;
+  /** Set while the run is paused for the name tree to catch up (cleared when it resumes). */
+  waiting?: { name: string; since: number; until: number; reason: string };
 };
 
 export const newState = (
@@ -262,6 +264,8 @@ export type RunDeps = {
   onUpdate: (s: State, p?: Progress & { name: string }) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** A live (overwritable) line while paused for the name tree, e.g. "waiting for confirmations… resuming in 04:12". */
+  onWait?: (line: string) => void;
   /** A line saying what the run is waiting for; called at least every HEARTBEAT_MS during every wait. */
   log?: (msg: string) => void;
   /** Re-prove wallet proofs from orphaned blocks; called when the wallet refuses its own BEEF (proofRepair.ts). */
@@ -340,6 +344,34 @@ const REVISITS = 3;
 /** Block waits per run when ten names in a row fail on holds (chain lag behind our own mints) before giving up. */
 export const BLOCK_PAUSES = 12;
 
+/**
+ * The name tree is behind our own unconfirmed mints ("still catching up", waiting for confirmations, an
+ * unconfirmed parent, a too-long mempool chain). Nothing is broken: wait and retry the SAME name. These never
+ * count toward the ten-in-a-row stop (18 Oct 2026: "seychelles" streak ended a multi-day run).
+ */
+export const isTreeWait = (msg: string) =>
+  /still catching up|catching up with your last mints|wait(ing)? for (them|it|the[a-z ]*)? ?to confirm|waiting for confirmations?|unconfirmed (parent|ancestor|input)|parent (is )?(still )?unconfirmed|too[- ]long[- ]mempool[- ]chain|mempool chain (is )?too long|too many unconfirmed (ancestors|parents)|too-long-mempool-chain/i.test(
+    msg,
+  );
+export const TREE_WAIT_START_MS = 2 * 60_000;
+export const TREE_WAIT_MAX_MS = 10 * 60_000;
+/** Backoff for the n-th consecutive tree wait on one name (0-based): 2, 4, 8, 10, 10… minutes. */
+export const treeWaitMs = (n: number) => Math.min(TREE_WAIT_MAX_MS, TREE_WAIT_START_MS * 2 ** Math.min(n, 10));
+const mmss = (ms: number) => {
+  const t = Math.max(0, Math.ceil(ms / 1000));
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+};
+/** Sleep that returns as soon as `signal` aborts (Ctrl-C), not at the end of the current chunk. */
+export const abortableSleep = (sleep: (ms: number) => Promise<void>, ms: number, signal: AbortSignal) =>
+  signal.aborted
+    ? Promise.resolve()
+    : new Promise<void>((resolve) => {
+        const done = () => (signal.removeEventListener('abort', done), resolve());
+        signal.addEventListener('abort', done, { once: true });
+        void sleep(ms).then(done, done);
+      });
+const TREE_TICK_MS = 1000;
+
 const LIST_RETRIES = 2;
 const LIST_RETRY_MS = 5000;
 const NAME_RETRIES = 4;
@@ -350,7 +382,7 @@ export const BUDGET_STOP = 'Stopped before going over the budget';
 export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSignal): Promise<RunResult> => {
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  let state: State = { ...start, stopped: undefined };
+  let state: State = { ...start, stopped: undefined, waiting: undefined };
   let failedInARow = 0;
   let hardInARow = 0; // failures in the current streak that aren't holds
   let blockPauses = 0;
@@ -362,7 +394,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
   const set = (i: number, patch: Partial<Item>, extra: Partial<State> = {}) =>
     commit({ ...extra, items: state.items.map((it, j) => (j === i ? { ...it, ...patch } : it)) });
   const end = (stopped: RunResult['stopped'], error?: string): RunResult => {
-    commit({ stopped: error ?? stopped });
+    commit({ stopped: error ?? stopped, waiting: undefined });
     return { stopped, error, state };
   };
   const budgetLeft = () => state.budgetSats - state.spentSats;
@@ -435,6 +467,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
     if (signal.aborted) return end('cancelled');
     if (deps.stopped?.()) return end('killed', 'Kill switch is on (bwalletx resume to continue)');
     let attempt = 0;
+    let treeWaits = 0;
     let depthWaits = 0;
     let beefRepaired = false;
     for (;;) {
@@ -481,10 +514,11 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         }
         failedInARow = 0;
         hardInARow = 0;
+        if (state.waiting) commit({ waiting: undefined });
         break;
       } catch (e) {
         if (e instanceof MiningCancelled || signal.aborted) {
-          set(i, { status: 'pending' });
+          set(i, { status: 'pending' }, { waiting: undefined });
           return end('cancelled');
         }
         if (e instanceof NameTakenError) {
@@ -510,6 +544,23 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           set(i, { status: 'pending', note: `Waiting for the next block: ${msg}` });
           await waitForNextBlock(deps.fetch, sleep, signal, undefined, undefined, deps.log);
           if (signal.aborted) return end('cancelled');
+          continue;
+        }
+        if (isTreeWait(msg)) {
+          // Transient: pause, then retry this same name. Not a failure (no streak, no "error" status).
+          const ms = treeWaitMs(treeWaits++);
+          const since = state.waiting?.name === it.name ? state.waiting.since : now();
+          const until = now() + ms;
+          set(i, { status: 'pending', note: `Waiting for confirmations: ${msg}` }, { waiting: { name: it.name, since, until, reason: msg.slice(0, 200) } });
+          for (let left = ms; left > 0 && !signal.aborted; left -= TREE_TICK_MS) {
+            deps.onWait?.(`waiting for confirmations… resuming "${it.name}" in ${mmss(left)}`);
+            if ((ms - left) % HEARTBEAT_MS === 0) deps.log?.(`"${it.name}": waiting for confirmations… resuming in ${mmss(left)} (${msg.slice(0, 120)})`);
+            await abortableSleep(sleep, Math.min(TREE_TICK_MS, left), signal);
+          }
+          if (signal.aborted) {
+            set(i, { status: 'pending' }, { waiting: undefined });
+            return end('cancelled');
+          }
           continue;
         }
         // "Still catching up" is usually the overlay lagging behind our own mints: two quick retries, then move on
@@ -591,7 +642,7 @@ export const reportHtml = (s: State) => {
 <style>:root{color-scheme:light dark;--bg:#0b0b0c;--fg:#eee;--mut:#999;--gold:#d4af37}body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,sans-serif}
 h1{font-size:20px;color:var(--gold)}.k{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:12px 0}.k div{border:1px solid #333;border-radius:8px;padding:8px}.k b{display:block;font-size:20px}
 table{width:100%;border-collapse:collapse;font-size:13px}td{border-top:1px solid #222;padding:4px 6px;vertical-align:top}.tx a{color:var(--gold);margin-right:4px}small{color:var(--mut)}</style></head><body>
-<h1>OpNS batch · ${esc(s.account)}</h1><small>Updated ${new Date(s.updatedAt).toLocaleString()}${s.stopped ? ` · last stop: ${esc(s.stopped)}` : ''}</small>
+<h1>OpNS batch · ${esc(s.account)}</h1><small>Updated ${new Date(s.updatedAt).toLocaleString()}${s.waiting ? ` · waiting for confirmations on ${esc(s.waiting.name)} since ${new Date(s.waiting.since).toLocaleString()}` : ''}${s.stopped ? ` · last stop: ${esc(s.stopped)}` : ''}</small>
 <div class="k"><div><b>${m.done}/${m.total}</b>names done</div><div><b>${m.listed}</b>listed</div><div><b>${m.vaulted}</b>to owner</div><div><b>${m.skipped}</b>taken, skipped</div><div><b>${m.spentSats.toLocaleString()}</b>of ${m.budgetSats.toLocaleString()} sats</div><div><b>${esc(fmtDuration(m.etaSeconds))}</b>ETA</div></div>
 <table><tr><td>name</td><td>route</td><td>status</td><td>price</td><td>txids</td><td>note</td></tr>${rows}</table></body></html>`;
 };
