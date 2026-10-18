@@ -89,7 +89,7 @@ const errText = (e: unknown) => {
 export const isDoubleSpend = (e: unknown) =>
   /double|spent|conflict|missing.?inputs|DOUBLE_SPEND|SEEN_IN_ORPHAN|REVIEW_ACTIONS|require review/i.test(errText(e));
 
-type Start = { outpoint: string; domain: string; beefHint?: number[]; fromIndexer: boolean; txid?: string; at?: number };
+export type Start = { outpoint: string; domain: string; beefHint?: number[]; fromIndexer: boolean; txid?: string; at?: number };
 
 /** Deepest unspent node for `name`: our own cached node when it is at least as deep as the indexer's. */
 const pickNode = (tree: OpnsTree | undefined, name: string, indexed: MineNode | null): Start | null => {
@@ -99,6 +99,43 @@ const pickNode = (tree: OpnsTree | undefined, name: string, indexed: MineNode | 
     return { outpoint: local.outpoint, domain: local.domain, beefHint: tree?.beefFor(local), fromIndexer: false, txid: local.txid, at: local.at };
   if (idx) return { outpoint: idx.outpoint, domain: idx.domain, fromIndexer: true };
   return null;
+};
+
+/**
+ * The indexer's node, brought up to the live head (19 Oct 2026, "jackpot"): api.1sat.app kept answering a "jack"
+ * node that someone else had spent and re-stated on-chain. Our tree cache had marked it spent, so pickNode dropped
+ * it, fell back to our shallower "jac" node (claimed char, no child) and every try ended "still catching up".
+ * Walk the spend chain forward (followForward: each spend's output 0 re-states the same domain), load the head
+ * and keep it only when it decodes as the same domain. Null when the chain can't confirm a live node.
+ */
+export const liveIndexed = async (
+  deps: Pick<RegisterDeps, 'ctx' | 'fetch' | 'load' | 'tree' | 'log'>,
+  indexed: MineNode,
+): Promise<(MineNode & { beef?: number[] }) | null> => {
+  const head = await followForward(deps.fetch, indexed.outpoint, 8);
+  if (head === indexed.outpoint) return deps.tree?.isSpent(head) ? null : indexed;
+  try {
+    const node = await (deps.load ?? loadNode)(deps.ctx, head);
+    if (node.state.domain !== indexed.domain) return null;
+    deps.tree?.markSpent(indexed.outpoint);
+    if (deps.tree?.isSpent(head)) return null;
+    deps.log?.(`Indexer node "${indexed.domain}" was spent on-chain; continuing from its re-stated node ${head}`);
+    return { outpoint: head, domain: indexed.domain, beef: node.beef };
+  } catch {
+    return null;
+  }
+};
+
+/** pickNode, after bringing the indexer's answer up to the chain's live head. */
+export const resolveStart = async (
+  deps: Pick<RegisterDeps, 'ctx' | 'fetch' | 'load' | 'tree' | 'log'>,
+  name: string,
+  indexed: MineNode | null,
+): Promise<Start | null> => {
+  const live = indexed ? await liveIndexed(deps, indexed) : null;
+  const start = pickNode(deps.tree, name, live);
+  if (start?.fromIndexer && live?.beef) start.beefHint = live.beef;
+  return start;
 };
 
 /** The child node `domain` minted in the same tx as this restated parent (output 1), when that is what it is. */
@@ -169,19 +206,12 @@ export const mineName = async (
   // The overlay already has a node for the whole name and it is not ours: someone (or another of our machines)
   // mined it and the name index has not caught up. Taken, not "catching up".
   if (indexed && indexed.domain === name) throw new NameTakenError(name);
-  const first = pickNode(tree, name, indexed);
+  const first = await resolveStart(deps, name, indexed);
   if (!first) throw new Error(indexed ? catchingUp(name) : `No mine-tree node found for "${name}"`);
 
   const totalChars = name.length - first.domain.length;
   const steps: MintStepResult[] = [];
   let outpoint = first.outpoint;
-  if (first.fromIndexer) {
-    const head = await followForward(deps.fetch, first.outpoint);
-    if (head !== first.outpoint) {
-      tree?.markSpent(first.outpoint);
-      outpoint = head;
-    }
-  }
   let beefHint = first.beefHint;
   let fromIndexer = first.fromIndexer; // the node came from the overlay (vs our own fresh/cached child)
   let retries = 0;
@@ -203,19 +233,12 @@ export const mineName = async (
       deps.log?.(`Cached node "${c.domain}" (${c.txid.slice(0, 12)}…) never reached the chain: dropping it and starting from the indexer`);
       tree.forget(c.txid);
       ghosts++;
-      const next = pickNode(tree, name, await fetchMineNode(deps.fetch, name));
+      const next = await resolveStart(deps, name, await fetchMineNode(deps.fetch, name));
       if (!next) throw new Error(catchingUp(name));
       outpoint = next.outpoint;
       beefHint = next.beefHint;
       fromIndexer = next.fromIndexer;
       cached = next.fromIndexer ? null : next;
-      if (next.fromIndexer) {
-        const head = await followForward(deps.fetch, next.outpoint);
-        if (head !== next.outpoint) {
-          tree.markSpent(next.outpoint);
-          outpoint = head;
-        }
-      }
       continue;
     }
     cached = null;
@@ -294,7 +317,7 @@ export const mineName = async (
         fromIndexer = true;
         continue;
       }
-      const next = pickNode(tree, name, await fetchMineNode(deps.fetch, name));
+      const next = await resolveStart(deps, name, await fetchMineNode(deps.fetch, name));
       if (retries++ >= 3 || !next || next.outpoint === node.outpoint) throw new Error(catchingUp(name));
       outpoint = next.outpoint;
       beefHint = next.beefHint;
