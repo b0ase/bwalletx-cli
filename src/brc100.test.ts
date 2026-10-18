@@ -25,6 +25,21 @@ describe('outgoingSats', () => {
     expect(outgoingSats({ ...args, outputs: [{ lockingScript: lock, satoshis: 60_000, outputDescription: 'more out' }] })).toBe(10_000);
   });
 
+  it("counts the wallet's own coins named as inputs as outgoing (cap bypass, 18 Oct 2026)", () => {
+    const src = new Transaction();
+    src.addOutput({ lockingScript: new P2PKH().lock(PrivateKey.fromRandom().toAddress()), satoshis: 50_000 });
+    const beef = new Beef();
+    beef.mergeTransaction(src);
+    const outpoint = `${src.id('hex')}.0`;
+    const args = {
+      description: 'drain via own coin',
+      inputBEEF: beef.toBinary(),
+      inputs: [{ outpoint, inputDescription: 'the wallet coin', unlockingScriptLength: 108 }],
+      outputs: [{ lockingScript: lock, satoshis: 49_000, outputDescription: 'to the site' }],
+    };
+    expect(outgoingSats(args, new Set([outpoint]))).toBe(49_000);
+  });
+
   it('counts outputs in full when the BEEF is unreadable', () => {
     expect(outgoingSats({ description: 'bad beef', inputBEEF: [1, 2, 3], inputs: [{ outpoint: `${'a'.repeat(64)}.0`, inputDescription: 'x', unlockingScriptLength: 1 }], outputs: [{ lockingScript: lock, satoshis: 700, outputDescription: 'out' }] })).toBe(700);
   });

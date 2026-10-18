@@ -33,6 +33,7 @@ import {
   saveKeyFile,
   setLoaded,
   setPaper,
+  withSpendLock,
   writeConfig,
   type AccountConfig,
 } from './store.js';
@@ -136,6 +137,11 @@ export async function send(usd: number, to: string, account?: string, opts: { pa
   const a = resolveAccount(account);
   if (!(usd > 0) || usd > 1e6) throw new Error('Amount must be a positive number of dollars');
   if (a.kind === 'paired') return phoneDo(a.name, 'send', { usd, to });
+  // Gate → sign → log as one step per account, so parallel spends can't all pass the daily cap.
+  return withSpendLock(a.name, () => sendLocked(a, usd, to, opts));
+}
+
+async function sendLocked(a: AccountConfig, usd: number, to: string, opts: { passphrase?: string; satsPerKb?: number }): Promise<SendResult> {
   const rate = await bsvUsd();
   const sats = Math.round((usd / rate) * 1e8);
   if (sats < 1) throw new Error('Amount is less than 1 satoshi');
@@ -143,11 +149,15 @@ export async function send(usd: number, to: string, account?: string, opts: { pa
   if (!g.ok) return { ok: false, text: `Refused: ${g.reason}` };
   if (g.paper) return { ok: true, paper: true, text: `Paper send of $${usd.toFixed(2)} to ${to} (nothing signed)`, sats };
   const rule = getLoaded(a.name)?.strategy.name;
+  // Once a signed tx has been handed to a broadcaster it may be out even if the call failed (timeouts):
+  // such a failure still counts against the daily cap.
+  let handedOut = false;
   try {
     const keys = await unlock(a.name, opts.passphrase);
     const sender = a.identityAddress;
     const dest = await resolveDestination(to, sats, sender);
     const tx = await buildSend(keys.payPk, dest, opts.satsPerKb ?? readConfig().satsPerKb ?? DEFAULT_SATS_PER_KB);
+    handedOut = true;
     let txid: string;
     if (dest.p2p) {
       await notifyP2p(dest.p2p, tx, sender);
@@ -157,7 +167,7 @@ export async function send(usd: number, to: string, account?: string, opts: { pa
     return { ok: true, text: `Sent $${usd.toFixed(2)} (${sats} sats) to ${to}`, txid, sats };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    appendLog(a.name, { at: Date.now(), action: 'failed', detail: `Send $${usd.toFixed(2)} to ${to} failed: ${msg}`, usd: 0 });
+    appendLog(a.name, { at: Date.now(), action: 'failed', detail: `Send $${usd.toFixed(2)} to ${to} failed: ${msg}${handedOut ? ' (may have been broadcast: counted against the cap)' : ''}`, usd: handedOut ? usd : 0 });
     return { ok: false, text: `Send failed: ${msg}` };
   }
 }
@@ -197,6 +207,10 @@ export async function buy(tokenId: string, maxUsd: number, account?: string, now
   if (opts.dryRun) return buyDryRun(id, maxUsd);
   const a = resolveAccount(account);
   if (a.kind === 'paired') return phoneDo(a.name, 'buy', { tokenId: id, usd: maxUsd }) as Promise<BuyResult>;
+  return withSpendLock(a.name, () => buyLocked(a, id, maxUsd, now, opts));
+}
+
+async function buyLocked(a: AccountConfig, id: string, maxUsd: number, now: number, opts: BuyOpts): Promise<BuyResult> {
   const loaded = getLoaded(a.name);
   const paper = loaded?.mode === 'paper';
   if (paper) {
@@ -229,8 +243,10 @@ export async function buy(tokenId: string, maxUsd: number, account?: string, now
   const g = gateAction(a.name, { kind: 'buy', token: id, ticker, usd, priceUsd, amount: pick.tokens }, {}, now);
   if (!g.ok) return { ok: false, text: `Refused: ${g.reason}` };
   const rule = loaded?.strategy.name;
+  // Set once the signed purchase is handed to a broadcaster: a failure after that may still have spent.
+  let handedOut = false;
   const fail = (msg: string): BuyResult => {
-    appendLog(a.name, { at: Date.now(), action: 'failed', detail: `Buy ${+pick.tokens.toFixed(6)} ${name} for $${usd.toFixed(2)} failed: ${msg}`, usd: 0 });
+    appendLog(a.name, { at: Date.now(), action: 'failed', detail: `Buy ${+pick.tokens.toFixed(6)} ${name} for $${usd.toFixed(2)} failed: ${msg}${handedOut ? ' (may have been broadcast: counted against the cap)' : ''}`, usd: handedOut ? usd : 0 });
     return { ok: false, text: `Buy failed: ${msg}` };
   };
   try {
@@ -254,6 +270,7 @@ export async function buy(tokenId: string, maxUsd: number, account?: string, now
     const q = `Buy ${+pick.tokens.toFixed(6)} ${name} for $${allUsd.toFixed(2)} (${v.payoutSats} sats to seller + ${v.marketFeeSats} market fee${ovFee ? ` + ${ovFee.sats} overlay fee` : ''} + ${v.networkFee} network fee) from ${a.name}?`;
     if (opts.confirm && !(await opts.confirm(q))) return { ok: false, text: 'Not confirmed (pass --yes to skip)' };
     if (!(await outpointUnspent(pick.outpoint))) return fail('listing was just bought or cancelled');
+    handedOut = true;
     const txid = await broadcast(tx);
     try {
       await submitOverlay(tx.toBEEF(true), id);

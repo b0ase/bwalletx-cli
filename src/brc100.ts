@@ -19,7 +19,7 @@ import type { CreateActionArgs, WalletInterface } from '@bsv/sdk';
 import type { Wallet } from '@bsv/wallet-toolbox';
 import { gateAction } from './gate.js';
 import { bsvUsd } from './market.js';
-import { appendLog, home } from './store.js';
+import { appendLog, home, withSpendLock } from './store.js';
 import { utxos } from './wallet.js';
 import type { AgentKeys } from './keyfile.js';
 import { repairStaleProofs, type RepairResult } from './opns/proofRepair.js';
@@ -231,13 +231,16 @@ export async function migrateLocalToShared(local: AgentWallet, shared: AgentWall
  * own inputs (from inputBEEF, e.g. a pool's coins in a trade) bring in. The wallet's change and
  * fee are on top; the fee is small, change comes back.
  */
-export function outgoingSats(args: CreateActionArgs): number {
+export function outgoingSats(args: CreateActionArgs, owned: ReadonlySet<string> = new Set()): number {
   const out = (args.outputs ?? []).reduce((n, o) => n + o.satoshis, 0);
   if (!args.inputs?.length || !args.inputBEEF) return out;
   let brought = 0;
   try {
     const beef = Beef.fromBinary(Array.from(args.inputBEEF));
     for (const i of args.inputs) {
+      // The wallet's OWN coins named as inputs are not brought in by the caller: counting them would let a
+      // site spend the account's balance past the cap with outgoingSats = 0 (18 Oct 2026 review).
+      if (owned.has(i.outpoint)) continue;
       const [txid, vout] = i.outpoint.split('.');
       const tx = beef.findTxid(txid)?.tx;
       brought += tx?.outputs[Number(vout)]?.satoshis ?? 0;
@@ -310,12 +313,22 @@ const refusal = (message: string) => ({ isError: true, code: 6, parameter: 'bwal
 export type ServeWallet = {
   paired: boolean;
   call: (method: string, args: unknown, site: string) => Promise<unknown>;
+  /** Outpoints ("txid.vout") the wallet itself holds as spendable BSV; inputs naming them are the account's money. */
+  owned?: () => Promise<Set<string>>;
   close: () => Promise<void>;
 };
 
 export const localBackend = (w: AgentWallet): ServeWallet => {
   const api = w.wallet as unknown as Record<string, (args: unknown, originator?: string) => Promise<unknown>>;
-  return { paired: false, call: (m, args, site) => api[m](args, site), close: () => w.close() };
+  return {
+    paired: false,
+    call: (m, args, site) => api[m](args, site),
+    owned: async () => {
+      const r = await w.wallet.listOutputs({ basket: 'default', limit: 10_000 }, 'bwalletx-cli');
+      return new Set(r.outputs.map((o) => o.outpoint));
+    },
+    close: () => w.close(),
+  };
 };
 
 /** Phase 1 (read-only) and phase 2 (createAction/signAction: the phone prompts every time). */
@@ -429,9 +442,19 @@ export async function serve(input: AgentWallet | ServeWallet, o: ServeOptions) {
       return send(res, 400, refusal('bwalletx serve: privileged calls are not offered'), origin);
     }
 
+    // createAction/signAction: gate → sign → log under the account's spend lock, so parallel requests
+    // (or another process on the same account) can't all pass the daily cap before any is logged.
+    const spends = call === 'createAction' || call === 'signAction';
+    return spends ? withSpendLock(o.account, () => run(res, call, args, host, origin)) : run(res, call, args, host, origin);
+  };
+
+  const run = async (res: ServerResponse, call: string, args: Record<string, unknown>, host: string, origin: string) => {
+    let sats = 0;
     if (call === 'createAction') {
       const a = args as unknown as CreateActionArgs;
-      const sats = outgoingSats(a);
+      const owned = a.inputs?.length && w.owned ? await w.owned().catch(() => null) : new Set<string>();
+      if (!owned) return send(res, 503, refusal('bwalletx serve: could not read the wallet to check inputs; try again'), origin);
+      sats = outgoingSats(a, owned);
       const usd = sats ? (sats / 1e8) * (await price()) : 0;
       const g = gateAction(o.account, { kind: 'send', token: 'BSV', usd, to: host });
       if (!g.ok) {
@@ -448,7 +471,6 @@ export async function serve(input: AgentWallet | ServeWallet, o: ServeOptions) {
       if (LOGGED.has(call)) {
         const a = args as { description?: string };
         const r = out as { txid?: string };
-        const sats = call === 'createAction' ? outgoingSats(args as unknown as CreateActionArgs) : 0;
         const usd = sats ? (sats / 1e8) * (await price().catch(() => 0)) : 0;
         appendLog(o.account, {
           at: Date.now(),
