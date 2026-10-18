@@ -22,6 +22,7 @@ import { bsvUsd } from './market.js';
 import { appendLog, home } from './store.js';
 import { utxos } from './wallet.js';
 import type { AgentKeys } from './keyfile.js';
+import { repairStaleProofs, type RepairResult } from './opns/proofRepair.js';
 
 export const BRC100_PORT = 3321;
 
@@ -41,6 +42,8 @@ export type AgentWallet = {
   sendWaiting: () => Promise<void>;
   /** Run the monitor in the background (broadcasts, proofs, status) while a long-lived command runs. */
   startMonitor: () => void;
+  /** Re-check stored merkle proofs against the chain and re-prove any from an orphaned block (see opns/proofRepair.ts). */
+  repairProofs?: () => Promise<RepairResult>;
   close: () => Promise<void>;
 };
 
@@ -103,6 +106,19 @@ export async function openWallet(account: string, keys: AgentKeys): Promise<Agen
     },
     startMonitor: () => {
       monitor.startTasks().catch(() => undefined);
+    },
+    // The local monitor gets no reorg events, so proofs taken from a losing block stay put (16 Oct 2026).
+    repairProofs: async () => {
+      const tracker = await services.getChainTracker();
+      return repairStaleProofs({
+        roots: async () =>
+          (await knex('proven_txs').distinct('height', 'merkleRoot').orderBy('height', 'desc')) as { height: number; merkleRoot: string }[],
+        isValidRoot: (root, height) => tracker.isValidRootForHeight(root, height),
+        reprove: async (height, root) => {
+          const r = await storage.reproveHeightMerkleRoot(height, root);
+          return { updated: r.updated.length, unavailable: r.unavailable.length + r.unchanged.length };
+        },
+      });
     },
     close: async () => {
       await monitor.destroy().catch(() => undefined);
