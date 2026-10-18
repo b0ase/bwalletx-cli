@@ -385,10 +385,10 @@ describe('tree catching up: wait, then retry the same name', () => {
   const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
   const catching = (name: string) => `The name tree for "${name}" is still catching up with your last mints. Wait for them to confirm (about 10 minutes), then try again.`;
 
-  test('fifteen tree waits in a row do not stop the run; the same name is retried and minted', async () => {
+  test('five tree waits in a row do not stop the run; the same name is retried and minted', async () => {
     vi.useFakeTimers();
     try {
-      let fails = 15;
+      let fails = 5;
       const waits: string[] = [];
       const h = harness({ sleep: realSleep, onWait: (l: string) => waits.push(l) });
       const mine = h.deps.mine;
@@ -399,7 +399,7 @@ describe('tree catching up: wait, then retry the same name', () => {
       const seen: (string | undefined)[] = [];
       h.deps.save = (s) => seen.push(s.waiting ? `${s.waiting.name}@${s.waiting.since}` : undefined);
       const p = runHeadless(h.deps, state(['seychelles', 'zed']), h.ctl.signal);
-      await vi.advanceTimersByTimeAsync(2 * 60_000 + 4 * 60_000 + 8 * 60_000 + 12 * 10 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(2 * 60_000 + 4 * 60_000 + 8 * 60_000 + 2 * 10 * 60_000 + 60_000);
       const r = await p;
       expect(r.stopped).toBe('finished');
       expect(h.minted.map((m) => m.name)).toEqual(['seychelles', 'zed']);
@@ -408,6 +408,28 @@ describe('tree catching up: wait, then retry the same name', () => {
       expect(seen.filter(Boolean)[0]).toMatch(/^seychelles@/);
       // the "since" stays the start of the first wait across retries
       expect(new Set(seen.filter(Boolean)).size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a name still waiting after an hour is set aside and the run carries on', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ sleep: realSleep });
+      const mine = h.deps.mine;
+      h.deps.mine = async (...a) => {
+        if (a[0] === 'cyprus') throw new Error(catching(a[0]));
+        return mine(...a);
+      };
+      const p = runHeadless(h.deps, state(['cyprus', 'zed']), h.ctl.signal);
+      await vi.advanceTimersByTimeAsync(3 * 60 * 60_000);
+      const r = await p;
+      expect(r.stopped).toBe('finished');
+      expect(h.minted.map((m) => m.name)).toEqual(['zed']);
+      expect(r.state.items[0].status).toBe('error');
+      expect(r.state.items[0].note).toMatch(/^Set aside after/);
+      expect(r.state.waiting).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

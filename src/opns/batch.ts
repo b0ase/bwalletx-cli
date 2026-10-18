@@ -341,6 +341,8 @@ export const waitForNextBlock = async (
 export const isRevisitable = (msg: string) => /still catching up|must be valid transaction|not found|unknown tx|BEEF depth/i.test(msg);
 const REVISIT_MS = 15 * 60_000;
 const REVISITS = 3;
+/** A name still waiting for confirmations after this long is set aside (revisited later) so one stuck name can't hold up the run. */
+export const TREE_GIVEUP_MS = 60 * 60_000;
 /** Block waits per run when ten names in a row fail on holds (chain lag behind our own mints) before giving up. */
 export const BLOCK_PAUSES = 12;
 
@@ -550,6 +552,13 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           // Transient: pause, then retry this same name. Not a failure (no streak, no "error" status).
           const ms = treeWaitMs(treeWaits++);
           const since = state.waiting?.name === it.name ? state.waiting.since : now();
+          if (now() - since >= TREE_GIVEUP_MS) {
+            // 18 Oct 2026: "cyprus" waited for hours. Set it aside, carry on, come back to it later in the run.
+            set(i, { status: 'error', note: `Set aside after ${Math.round((now() - since) / 60_000)} min waiting for confirmations: ${msg}` }, { waiting: undefined });
+            deps.log?.(`"${it.name}" still waiting after an hour, moving on (will retry later)`);
+            if ((revisits.get(i) ?? 0) < REVISITS) failedAt.set(i, now());
+            break;
+          }
           const until = now() + ms;
           set(i, { status: 'pending', note: `Waiting for confirmations: ${msg}` }, { waiting: { name: it.name, since, until, reason: msg.slice(0, 200) } });
           for (let left = ms; left > 0 && !signal.aborted; left -= TREE_TICK_MS) {
