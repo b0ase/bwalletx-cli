@@ -31,6 +31,7 @@ import { mineName } from './opnsRegister.js';
 import { appendLedger, ledgerNames, ownerCheck } from './opnsOwner.js';
 import { fileKV, OpnsTree } from './opnsTree.js';
 import { indexerFetch } from './services.js';
+import { describeRepair } from './proofRepair.js';
 
 const safe = (s: string) => s.replace(/[^\w.-]/g, '_');
 export const statePath = (account: string) => join(home(), `opns-batch-${safe(account)}.json`);
@@ -229,12 +230,23 @@ export async function opnsMint(o: MintOptions): Promise<RunResult> {
     if (Date.now() - lastLog >= HEARTBEAT_MS) log(`Still working: ${doing} (no news for ${Math.round((Date.now() - lastLog) / 1000)} s)`);
   }, HEARTBEAT_MS);
   heartbeat.unref();
+  // A proof the wallet took from a block that lost a reorg makes every new mint fail ("merged Beef failed
+  // validation"): check the stored proofs against the chain before mining (read-only lookups, nothing broadcast).
+  if (w.repairProofs) {
+    doing = 'checking wallet proofs';
+    const r = await w.repairProofs().catch((e: unknown) => {
+      log(`Proof check skipped: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
+    });
+    if (r) log(describeRepair(r));
+  }
   try {
     const res = await runHeadless(
       {
         fetch: f,
         mine: (n, lockTo, signal, onProgress) => mineName({ ctx, fetch: f, tree, lockTo, log }, n, signal, onProgress),
         log,
+        repairProofs: w.repairProofs,
         list: async (n, sats) => {
           const id = await opnsIdFor(ctx, n);
           if (!id) throw new Error(`"${n}" not found in the agent wallet`);

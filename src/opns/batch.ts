@@ -16,6 +16,7 @@
 import { MiningCancelled, NameTakenError, type Progress } from './opnsRegister.js';
 import type { OwnerVerdict } from './opnsOwner.js';
 import { EXPECTED_HASHES } from './opnsPow.js';
+import { badBeefHelp, describeRepair, isBadBeef, type RepairResult } from './proofRepair.js';
 import { isTaken, OPNS_CHARSET } from './opnsMint.js';
 import type { Fetch } from './services.js';
 import { WOC } from '../market.js';
@@ -263,6 +264,8 @@ export type RunDeps = {
   sleep?: (ms: number) => Promise<void>;
   /** A line saying what the run is waiting for; called at least every HEARTBEAT_MS during every wait. */
   log?: (msg: string) => void;
+  /** Re-prove wallet proofs from orphaned blocks; called when the wallet refuses its own BEEF (proofRepair.ts). */
+  repairProofs?: () => Promise<RepairResult>;
 };
 
 /** How often a wait says what it is waiting for. */
@@ -433,6 +436,7 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
     if (deps.stopped?.()) return end('killed', 'Kill switch is on (bwalletx resume to continue)');
     let attempt = 0;
     let depthWaits = 0;
+    let beefRepaired = false;
     for (;;) {
       try {
         if (deps.isOurs(it.name)) {
@@ -487,7 +491,21 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
           await markTaken(i);
           break;
         }
-        const msg = e instanceof Error ? e.message : String(e);
+        let msg = e instanceof Error ? e.message : String(e);
+        if (isBadBeef(msg)) {
+          // A proof from an orphaned block poisons every BEEF the wallet builds: repair it and retry this name once.
+          // If nothing could be repaired every later name fails the same way, so stop with what to do.
+          if (!beefRepaired && deps.repairProofs) {
+            beefRepaired = true;
+            set(i, { status: 'pending', note: `Repairing wallet proofs after: ${msg}` });
+            const r = await deps.repairProofs().catch(() => null);
+            if (r) deps.log?.(describeRepair(r));
+            if (r && r.updated > 0) continue;
+            msg = badBeefHelp(msg, r);
+          } else msg = badBeefHelp(msg, null);
+          set(i, { status: 'error', note: msg });
+          return end('error', `${it.name}: ${msg}`);
+        }
         if (isDepthLimit(msg) && depthWaits++ < DEPTH_WAITS) {
           set(i, { status: 'pending', note: `Waiting for the next block: ${msg}` });
           await waitForNextBlock(deps.fetch, sleep, signal, undefined, undefined, deps.log);

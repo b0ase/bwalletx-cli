@@ -64,6 +64,10 @@ open ~/.bwalletx/opns-batch-opns.html # progress page (refreshes every 30 s) wit
 - **Emergency stop**: `bwalletx stop` (kill switch for every account), `bwalletx resume` to allow spending again.
 - **It stopped with an error**: the message says which name. Rerun to retry; a failed listing never stops minting
   and is retried at the end of each run.
+- **"merged Beef failed validation"**: a block reorg left the wallet holding merkle proofs from the losing block
+  (16 Oct 2026: height 971225). Each run now checks the wallet's proofs against the chain before mining
+  (`proof check: …` line) and replaces stale ones; the same error mid-run triggers one repair and a retry. If it
+  still stops, the replacement proofs weren't available yet: rerun in about 30 minutes. Nothing is broadcast.
 
 ## 4. Sweep (whenever you want)
 

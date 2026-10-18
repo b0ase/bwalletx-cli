@@ -301,3 +301,63 @@ describe('revisit held names in the same run (14 Oct 2026)', () => {
     expect(isRevisitable('covenant check failed at PC 2703')).toBe(false);
   });
 });
+
+describe('stale proofs after a reorg (16 Oct 2026: "merged Beef failed validation")', () => {
+  const badBeef = () => Object.assign(new Error('merged Beef failed validation.'), { code: 'WERR_INTERNAL' });
+
+  test('the wallet refusing its own BEEF triggers a proof repair, then the same name is retried and minted', async () => {
+    let repaired = false;
+    const h = harness();
+    const realMine = h.deps.mine;
+    const r = await runHeadless(
+      {
+        ...h.deps,
+        mine: async (...a) => {
+          if (!repaired) throw badBeef();
+          return realMine(...a);
+        },
+        repairProofs: async () => {
+          repaired = true;
+          return { checked: 96, stale: [{ height: 971225, merkleRoot: '35bc5d' }], updated: 86, unavailable: 0, errors: 0 };
+        },
+      },
+      state(['bignumber', 'bigpop']),
+      h.ctl.signal,
+    );
+    expect(r.stopped).toBe('finished');
+    expect(h.minted.map((m) => m.name)).toEqual(['bignumber', 'bigpop']);
+  });
+
+  test('nothing repairable: stops at once (not after ten names) with what to do, name left to retry', async () => {
+    let tries = 0;
+    let repairs = 0;
+    const h = harness();
+    const r = await runHeadless(
+      {
+        ...h.deps,
+        mine: async () => {
+          tries++;
+          throw badBeef();
+        },
+        repairProofs: async () => (repairs++, { checked: 96, stale: [{ height: 971225, merkleRoot: '35bc5d' }], updated: 0, unavailable: 86, errors: 0 }),
+      },
+      state(['bignumber', 'bigpop']),
+      h.ctl.signal,
+    );
+    expect(r.stopped).toBe('error');
+    expect(tries).toBe(1);
+    expect(repairs).toBe(1);
+    expect(r.error).toMatch(/^bignumber: merged Beef failed validation\./);
+    expect(r.error).toMatch(/reorg/);
+    expect(r.error).toMatch(/height 971225/);
+    expect(r.error).toMatch(/Run the same command again/);
+    expect(r.state.items.find((x) => x.name === 'bigpop')?.status).toBe('pending');
+  });
+
+  test('without a repair hook the message still says what happened', async () => {
+    const h = harness();
+    const r = await runHeadless({ ...h.deps, mine: async () => { throw badBeef(); } }, state(['bignumber']), h.ctl.signal);
+    expect(r.stopped).toBe('error');
+    expect(r.error).toMatch(/orphan|reorg/);
+  });
+});
