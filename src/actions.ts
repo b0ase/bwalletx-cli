@@ -54,8 +54,17 @@ export async function newKey(name: string, out: string, passphrase?: string) {
   return importKey(out, pass);
 }
 
+/** "My Trader!" → "my-trader"; names that are already valid stay as they are. */
+export const cliAccountName = (name: string) => {
+  if (/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,39}$/.test(name)) return name;
+  return name.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'agent';
+};
+
 export async function importKey(file: string, passphrase?: string) {
-  const parsed = validateKeyFile(JSON.parse(readFileSync(file, 'utf8')));
+  const raw = JSON.parse(readFileSync(file, 'utf8')) as { name?: unknown };
+  // The app exports the account's display name ("My Trader"); turn it into a CLI account name.
+  if (raw && typeof raw === 'object' && typeof raw.name === 'string') raw.name = cliAccountName(raw.name);
+  const parsed = validateKeyFile(raw);
   const keys = await decryptKeyFile(parsed, passphrase ?? (await getPassphrase(`Passphrase for ${parsed.name}: `)));
   const c = readConfig();
   const prev = c.accounts[parsed.name];

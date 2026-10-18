@@ -61,6 +61,16 @@ export const readPairing = (name: string) => readJsonFile<Pairing>(file(name));
 const savePairing = (p: Pairing) => writeJsonFile(file(p.name), p, 0o600);
 export const isPaired = (name: string) => existsSync(file(name));
 
+/** A relay frame as JSON, or null when it isn't (never throws: the relay is not trusted). */
+export const parseFrame = (raw: unknown): unknown => {
+  try {
+    const f = JSON.parse(String(raw)) as unknown;
+    return f && typeof f === 'object' ? f : null;
+  } catch {
+    return null;
+  }
+};
+
 const open = (url: string) => new WebSocket(url, { headers: { Origin: CLI_ORIGIN }, handshakeTimeout: 10_000 });
 
 /** `bwalletx login`: show a QR, wait for the phone, save the pairing as account `name`. */
@@ -99,8 +109,11 @@ function round(name: string, mode: 'agent' | 'brc100', out: (s: string) => void)
     });
     ws.on('error', (err) => !sealer && (clearTimeout(timer), reject(new Error(`Pairing service unreachable: ${err.message}`))));
     ws.on('message', async (raw) => {
-      const f = JSON.parse(String(raw)) as unknown;
+      // A bad frame from the relay must not crash the CLI (an unhandled rejection ends the process).
+      const f = parseFrame(raw);
+      if (!f) return;
       if ((f as HelloFrame).t === 'hello' && !sealer) {
+        if (!/^0[23][0-9a-f]{64}$/i.test(String((f as HelloFrame).k))) return;
         clearTimeout(timer);
         phoneKey = (f as HelloFrame).k;
         const { key, code } = await deriveSession(S, phoneKey, c);
@@ -220,7 +233,8 @@ export class PhoneSession {
   }
 
   private async onFrame(raw: string) {
-    const f = JSON.parse(raw) as unknown;
+    const f = parseFrame(raw);
+    if (!f) return;
     if ((f as { t?: string; error?: string }).t === 'relay' && (f as { error?: string }).error)
       return this.failAll(new Error(`Pairing service: ${(f as { error: string }).error}`));
     if (!isSealed(f)) return;
