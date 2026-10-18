@@ -4,7 +4,7 @@ import { unlock } from './actions.js';
 import { gateAction } from './gate.js';
 import { bsvUsd } from './market.js';
 import { isPaired, readPairing } from './paired.js';
-import { appendLog, readConfig, resolveAccount } from './store.js';
+import { appendLog, readConfig, resolveAccount, withSpendLock } from './store.js';
 import type { AgentWallet } from './brc100.js';
 
 const accountName = (name?: string) => {
@@ -61,7 +61,15 @@ export async function brc100Addresses(account?: string) {
 type WithdrawWallet = Pick<AgentWallet, 'wallet' | 'sendWaiting'>;
 
 /** The withdraw itself, given an open wallet: gate (as a `send`), refuse paper, sign, broadcast, relay, log. */
-export async function withdrawFrom(
+export function withdrawFrom(
+  name: string,
+  w: WithdrawWallet,
+  o: { amount: number | 'all'; address: string; have: number; rate: number; relay?: (r: unknown) => Promise<unknown> },
+) {
+  return withSpendLock(name, () => withdrawLocked(name, w, o));
+}
+
+async function withdrawLocked(
   name: string,
   w: WithdrawWallet,
   o: { amount: number | 'all'; address: string; have: number; rate: number; relay?: (r: unknown) => Promise<unknown> },

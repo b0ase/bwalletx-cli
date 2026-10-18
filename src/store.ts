@@ -7,7 +7,7 @@
  *   log/<name>.jsonl               activity log, one JSON entry per line (oldest first)
  *   STOP                           kill switch: while it exists every spending action is refused
  */
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentLogEntry, Loaded, PaperBook } from './strategy.js';
@@ -129,3 +129,85 @@ export const setAllStopped = (on: boolean) => {
     writeFileSync(stopFile(), `stopped at ${new Date().toISOString()}\n`, { mode: 0o600 });
   } else rmSync(stopFile(), { force: true });
 };
+
+// ---- spend lock ----
+/**
+ * One spend at a time per account, across processes (CLI, `agent run`, MCP, `serve`). The gate reads the
+ * log and the spend is logged only after it is signed, so without this two processes (or two parallel
+ * `serve` requests) both pass the daily cap before either is logged (18 Oct 2026 review).
+ * mkdir is atomic. The holder writes its pid and touches the lock every staleMs/4, so a long spend
+ * (e.g. a buy waiting on a confirm prompt) is never taken over; a lock whose owner pid is dead, or that
+ * has not been touched for staleMs (a crashed or frozen process), is.
+ */
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+const lockStale = (dir: string, staleMs: number) => {
+  let age: number;
+  try {
+    age = Date.now() - statSync(dir).mtimeMs;
+  } catch {
+    return false; // gone: just retry mkdir
+  }
+  if (age > staleMs) return true;
+  try {
+    const pid = Number(readFileSync(join(dir, 'pid'), 'utf8'));
+    return pid > 0 && pid !== process.pid && !pidAlive(pid);
+  } catch {
+    return false; // pid not written yet (holder between mkdir and write): not stale
+  }
+};
+const held = new Map<string, Promise<unknown>>();
+export async function withSpendLock<T>(name: string, fn: () => Promise<T>, o: { staleMs?: number; waitMs?: number } = {}): Promise<T> {
+  const staleMs = o.staleMs ?? 10 * 60_000;
+  const deadline = Date.now() + (o.waitMs ?? 3 * 60_000);
+  // In-process: chain behind any spend already running here (serve's parallel requests).
+  const prev = held.get(name) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((r) => (release = r));
+  const chained = prev.then(() => mine);
+  held.set(name, chained);
+  await prev.catch(() => undefined);
+  const dir = p('locks', `${safe(name)}.spend`);
+  ensure(p('locks'));
+  try {
+    for (;;) {
+      try {
+        mkdirSync(dir, { mode: 0o700 });
+        break;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+        if (lockStale(dir, staleMs)) {
+          rmSync(dir, { recursive: true, force: true });
+          continue;
+        }
+        if (Date.now() > deadline) throw new Error(`Another spend on ${name} is still running (lock ${dir}); try again`);
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    writeFileSync(join(dir, 'pid'), String(process.pid), { mode: 0o600 });
+    const beat = setInterval(() => {
+      try {
+        const t = new Date();
+        utimesSync(dir, t, t);
+      } catch {
+        /* lock dir gone; nothing to refresh */
+      }
+    }, Math.max(1000, staleMs / 4));
+    beat.unref();
+    try {
+      return await fn();
+    } finally {
+      clearInterval(beat);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    release();
+    if (held.get(name) === chained) held.delete(name);
+  }
+}
