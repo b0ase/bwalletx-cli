@@ -580,6 +580,9 @@ opns
         [
           `${s.account}: ${s.done}/${s.total} names done · ${s.listed} listed · ${s.vaulted} to owner · ${s.skipped} taken · ${s.pending} to go${s.notListed ? ` · ${s.notListed} not listed yet` : ''}`,
           `  spent ${s.spentSats.toLocaleString()} of ${s.budgetSats.toLocaleString()} sats · ${s.txs} txs · ${s.secsPerChar ? `${s.secsPerChar.toFixed(1)} s/char` : ''} · ETA ${fmtDuration(s.etaSeconds)}`,
+          s.waiting
+            ? `  waiting for confirmations on "${s.waiting.name}" since ${new Date(s.waiting.since).toLocaleString()} · retry ${s.waiting.until > Date.now() ? `in ${Math.ceil((s.waiting.until - Date.now()) / 60_000)} min` : 'due now'} (${s.waiting.reason.slice(0, 100)})`
+            : '',
           s.stopped ? `  last stop: ${s.stopped}` : '',
           `  report: ${s.report}`,
         ].filter(Boolean).join('\n'));
