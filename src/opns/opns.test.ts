@@ -370,3 +370,56 @@ d2('followForward', () => {
     e2(await ff(f, 'c.0')).toBe('c.0');
   });
 });
+
+import { resolveStart } from './opnsRegister.js';
+import { OpnsTree } from './opnsTree.js';
+import type { LoadedNode } from './opnsMint.js';
+d2('resolveStart: indexer node spent on-chain (19 Oct 2026 "jackpot")', () => {
+  const STALE = `${'1'.repeat(64)}.0`;
+  const HEAD = `${'2'.repeat(64)}.0`;
+  // The chain: STALE (jack) was spent by HEAD's tx, whose output 0 re-states "jack" and is unspent.
+  const woc = (spends: Record<string, string>) =>
+    (async (url: string) => {
+      const m = /tx\/([^/]+)\/(\d+)\/spent/.exec(url);
+      const next = m && spends[`${m[1]}.${m[2]}`];
+      return next ? new Response(JSON.stringify({ txid: next })) : new Response('', { status: 404 });
+    }) as unknown as Fetch;
+  const loads: string[] = [];
+  const load = (async (_ctx: unknown, op: string) => {
+    loads.push(op);
+    return { outpoint: op, vout: 0, beef: [1, 2, 3], state: { domain: op === HEAD ? 'jack' : 'other' } } as unknown as LoadedNode;
+  }) as never;
+  const treeWith = (spent: string[]) => {
+    const now = Date.now();
+    const s = {
+      v: 1,
+      nodes: { jac: { domain: 'jac', outpoint: `${'3'.repeat(64)}.0`, txid: '3'.repeat(64), at: now } },
+      spent: Object.fromEntries(spent.map((o) => [o, now])),
+      names: {},
+    };
+    const kv = { v: JSON.stringify(s), getItem: () => kv.v, setItem: (_k: string, v: string) => (kv.v = v) };
+    return new OpnsTree(kv, 'tree');
+  };
+  const ctx = {} as never;
+
+  t2('follows the spend to the re-stated "jack" node instead of falling back to our shallower "jac"', async () => {
+    const tree = treeWith([STALE]);
+    const s = await resolveStart({ ctx, fetch: woc({ [STALE]: '2'.repeat(64) }), load, tree }, 'jackpot', { outpoint: STALE, domain: 'jack' });
+    e2(s).toMatchObject({ outpoint: HEAD, domain: 'jack', fromIndexer: true, beefHint: [1, 2, 3] });
+  });
+  t2('an indexer node unspent on-chain and not in our spent list is used as is', async () => {
+    const tree = treeWith([]);
+    const s = await resolveStart({ ctx, fetch: woc({}), load, tree }, 'jackpot', { outpoint: HEAD, domain: 'jack' });
+    e2(s).toMatchObject({ outpoint: HEAD, domain: 'jack', fromIndexer: true });
+  });
+  t2('a head that decodes as a different domain is refused (falls back to the local node)', async () => {
+    const tree = treeWith([]);
+    const s = await resolveStart({ ctx, fetch: woc({ [STALE]: '9'.repeat(64) }), load, tree }, 'jackpot', { outpoint: STALE, domain: 'jack' });
+    e2(s).toMatchObject({ domain: 'jac', fromIndexer: false });
+  });
+  t2('a deeper local node still wins over the followed indexer node', async () => {
+    const tree = treeWith([STALE]);
+    const s = await resolveStart({ ctx, fetch: woc({ [STALE]: '2'.repeat(64) }), load, tree }, 'jac', { outpoint: STALE, domain: 'ja' });
+    e2(s).toMatchObject({ domain: 'jac', fromIndexer: false });
+  });
+});

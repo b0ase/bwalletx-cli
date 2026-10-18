@@ -343,6 +343,8 @@ const REVISIT_MS = 15 * 60_000;
 const REVISITS = 3;
 /** A name still waiting for confirmations after this long is set aside (revisited later) so one stuck name can't hold up the run. */
 export const TREE_GIVEUP_MS = 60 * 60_000;
+/** ...or after this many tree waits in a row on it (2 + 4 + 8 min ≈ 15 min; 19 Oct 2026: "jackpot" blocked the run for over an hour). */
+export const TREE_WAITS = 3;
 /** Block waits per run when ten names in a row fail on holds (chain lag behind our own mints) before giving up. */
 export const BLOCK_PAUSES = 12;
 
@@ -445,7 +447,19 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
   // REVISITS goes; the pass jumps back to the earliest one and walks forward again (done names are skipped).
   const failedAt = new Map<number, number>();
   const revisits = new Map<number, number>();
-  for (let i = 0; i < state.items.length; i++) {
+  for (let i = 0; ; i++) {
+    if (i >= state.items.length) {
+      // End of the queue with names still set aside: wait until the earliest is due, then go back to it.
+      if (!failedAt.size || signal.aborted) break;
+      const wait = Math.max(0, Math.min(...failedAt.values()) + REVISIT_MS - now());
+      if (wait > 0) {
+        deps.log?.(`${failedAt.size} name(s) set aside; retrying them in ${mmss(wait)}`);
+        await abortableSleep(sleep, wait, signal);
+        if (signal.aborted) return end('cancelled');
+      }
+      i = -1; // the pass re-starts from the earliest due name (done names are skipped)
+      continue;
+    }
     const due = [...failedAt].filter(([, t]) => now() - t >= REVISIT_MS).map(([j]) => j);
     if (due.length) {
       for (const j of due) {
@@ -550,12 +564,13 @@ export const runHeadless = async (deps: RunDeps, start: State, signal: AbortSign
         }
         if (isTreeWait(msg)) {
           // Transient: pause, then retry this same name. Not a failure (no streak, no "error" status).
-          const ms = treeWaitMs(treeWaits++);
+          const n = treeWaits++;
+          const ms = treeWaitMs(n);
           const since = state.waiting?.name === it.name ? state.waiting.since : now();
-          if (now() - since >= TREE_GIVEUP_MS) {
+          if (n >= TREE_WAITS || now() - since >= TREE_GIVEUP_MS) {
             // 18 Oct 2026: "cyprus" waited for hours. Set it aside, carry on, come back to it later in the run.
             set(i, { status: 'error', note: `Set aside after ${Math.round((now() - since) / 60_000)} min waiting for confirmations: ${msg}` }, { waiting: undefined });
-            deps.log?.(`"${it.name}" still waiting after an hour, moving on (will retry later)`);
+            deps.log?.(`"${it.name}" still waiting for confirmations after ${n} waits, moving on (will retry later)`);
             if ((revisits.get(i) ?? 0) < REVISITS) failedAt.set(i, now());
             break;
           }

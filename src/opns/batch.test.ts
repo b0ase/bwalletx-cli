@@ -385,7 +385,7 @@ describe('tree catching up: wait, then retry the same name', () => {
   const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
   const catching = (name: string) => `The name tree for "${name}" is still catching up with your last mints. Wait for them to confirm (about 10 minutes), then try again.`;
 
-  test('five tree waits in a row do not stop the run; the same name is retried and minted', async () => {
+  test('tree waits never stop the run: after three the name is set aside, the next is minted, then it is retried and minted', async () => {
     vi.useFakeTimers();
     try {
       let fails = 5;
@@ -402,18 +402,38 @@ describe('tree catching up: wait, then retry the same name', () => {
       await vi.advanceTimersByTimeAsync(2 * 60_000 + 4 * 60_000 + 8 * 60_000 + 2 * 10 * 60_000 + 60_000);
       const r = await p;
       expect(r.stopped).toBe('finished');
-      expect(h.minted.map((m) => m.name)).toEqual(['seychelles', 'zed']);
+      expect(h.minted.map((m) => m.name)).toEqual(['zed', 'seychelles']);
+      expect(r.state.items.find((i) => i.name === 'seychelles')?.status).toBe('done');
       expect(r.state.waiting).toBeUndefined();
       expect(waits[0]).toMatch(/waiting for confirmations… resuming "seychelles" in 02:00/);
       expect(seen.filter(Boolean)[0]).toMatch(/^seychelles@/);
-      // the "since" stays the start of the first wait across retries
-      expect(new Set(seen.filter(Boolean)).size).toBe(1);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  test('a name still waiting after an hour is set aside and the run carries on', async () => {
+  test('one stuck name blocks the batch ~15 min at most (3 waits), then the run moves on', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness({ sleep: realSleep });
+      const mine = h.deps.mine;
+      h.deps.mine = async (...a) => {
+        if (a[0] === 'jackpot') throw new Error(catching(a[0]));
+        return mine(...a);
+      };
+      const p = runHeadless(h.deps, state(['jackpot', 'zed']), h.ctl.signal);
+      await vi.advanceTimersByTimeAsync((2 + 4 + 8) * 60_000 + 1000);
+      expect(h.minted.map((m) => m.name)).toEqual(['zed']);
+      h.ctl.abort();
+      await vi.advanceTimersByTimeAsync(1000);
+      const r = await p;
+      expect(r.state.items.find((i) => i.name === 'jackpot')?.note).toMatch(/^Set aside after 14 min/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a name that never clears is set aside, revisited a few times, and the run still finishes', async () => {
     vi.useFakeTimers();
     try {
       const h = harness({ sleep: realSleep });
