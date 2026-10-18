@@ -20,7 +20,7 @@ set -euo pipefail
 
 AGENT_DIR=/opt/bmovies-agent
 BRANCH="${BWALLETX_CLI_BRANCH:-main}"
-REPO=https://github.com/b0ase/bwalletx-cli.git
+REPO=https://github.com/bitcoin-corp/bwalletx-cli.git
 CAP_USD=1.30        # £1 a day
 APPROVE_ABOVE_USD=0.13  # 10p
 export BWALLETX_HOME="$AGENT_DIR/home"

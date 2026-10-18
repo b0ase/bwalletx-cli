@@ -17,7 +17,7 @@ Keep name in either slice still goes to the owner.
 # 1. Node 22 + pnpm
 brew install node && npm install -g pnpm
 # 2. The CLI (opns commands are on main; the npm release does not have them yet)
-git clone https://github.com/b0ase/bwalletx-cli.git ~/bwalletx-cli
+git clone https://github.com/bitcoin-corp/bwalletx-cli.git ~/bwalletx-cli
 cd ~/bwalletx-cli && pnpm install && pnpm build && npm link
 bwalletx --version
 # 3. Lists: AirDrop (or copy) from the Mac mini's ~/Desktop to the laptop's ~/Desktop:

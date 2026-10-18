@@ -44,11 +44,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/b0ase/bwalletx-cli.git"
+    "url": "git+https://github.com/bitcoin-corp/bwalletx-cli.git"
   },
   "homepage": "https://bwalletx.com/cli",
   "bugs": {
-    "url": "https://github.com/b0ase/bwalletx-cli/issues"
+    "url": "https://github.com/bitcoin-corp/bwalletx-cli/issues"
   },
   "keywords": [
     "bsv",
