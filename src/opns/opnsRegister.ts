@@ -172,6 +172,55 @@ export const followForward = async (f: Fetch, outpoint: string, maxHops = 60): P
   return `${txid}.${vout}`;
 };
 
+/** A raw transaction from WhatsOnChain, decoded; null when it can't be fetched or parsed. */
+const fetchTx = async (f: Fetch, txid: string): Promise<Transaction | null> => {
+  let res: Response | null = null;
+  // WhatsOnChain rate-limits (429): wait and retry, like followForward does.
+  for (let waits = 0; waits <= 5; waits++) {
+    res = await f(`${WOC}/tx/${txid}/hex`).catch(() => null);
+    if (res?.status !== 429) break;
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  if (!res?.ok) return null;
+  try {
+    return Transaction.fromHex((await res.text()).trim());
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Where is the child node of a char that is already claimed? 20 Oct 2026: "mongolia", "seychelles" and "bradley"
+ * sat on "still catching up" for hours although every tx was hundreds of blocks deep. A node is re-stated by each
+ * mint that claims one more char, and that mint's output 1 is the child for that char. childOf() only looks at the
+ * node's OWN tx, so it finds the child only when the latest mint claimed this very char. When an earlier mint
+ * claimed it (here "g" on "mon", while the latest mint built "mont"), the child is output 1 of an earlier version.
+ * Each version spends the previous one as input 0, so walk back through them (at most one hop per claimed char)
+ * until a tx whose output 1 is `childDomain`. Null when the history doesn't show it.
+ */
+export const findChildBackwards = async (
+  f: Fetch,
+  node: Pick<LoadedNode, 'tx' | 'vout'>,
+  childDomain: string,
+  maxHops = 40,
+): Promise<string | null> => {
+  if (node.vout !== 0) return null; // a fresh child has no earlier versions
+  const domain = childDomain.slice(0, -1);
+  let tx: Transaction | null = node.tx;
+  for (let hop = 0; tx && hop < maxHops; hop++) {
+    const out1 = tx.outputs[1];
+    const st = out1 ? OpNS.decode(out1.lockingScript) : null;
+    if (st?.domain === childDomain) return `${tx.id('hex')}.1`;
+    const input = tx.inputs[0];
+    if (!input?.sourceTXID || (input.sourceOutputIndex ?? 0) !== 0) return null;
+    const prev: Transaction | null = await fetchTx(f, input.sourceTXID);
+    const prevOut = prev?.outputs[0] ? OpNS.decode(prev.outputs[0].lockingScript) : null;
+    if (!prev || prevOut?.domain !== domain) return null; // reached the node's creation, or something else
+    tx = prev;
+  }
+  return null;
+};
+
 /** Load errors meaning the providers have never heard of the tx. */
 export const isUnknownTx = (msg: string) => /must be valid transaction|unknown tx|not found|404/i.test(msg);
 /** A cached node older than this that the chain doesn't know is a ghost, not lag. */
@@ -253,6 +302,17 @@ export const mineName = async (
       // The claimed char completes the name and we hold nothing for it: the name is somebody's already.
       if (domain.length + 1 === name.length && !tree?.isOurs(name)) throw new NameTakenError(name);
       if (!child || tree?.isSpent(child)) {
+        // The claiming mint may be an EARLIER version of this node (see findChildBackwards), or its child may have
+        // been extended since: find the child, bring it up to its live head and carry on from there.
+        const childDomain = domain + name[domain.length];
+        const found = child ?? (await findChildBackwards(deps.fetch, node, childDomain));
+        if (found && retries++ < 6) {
+          const live = await liveIndexed(deps, { outpoint: found, domain: childDomain });
+          outpoint = live?.outpoint ?? found;
+          beefHint = live?.beef;
+          fromIndexer = true;
+          continue;
+        }
         // A claimed char on a node the overlay handed us, and no child of ours: someone else (or another of our
         // machines) mined it and the name index has not caught up. Taken, not "catching up" (14 Oct 2026: the
         // laptop spent 90 minutes retrying names the Mac mini had already minted).
