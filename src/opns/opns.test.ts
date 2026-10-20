@@ -7,7 +7,7 @@ import { OpNS } from '@1sat/templates';
 import { Hash, Script, Transaction } from '@bsv/sdk';
 import { lastWordMask, meetsDifficulty, mineRange, opnsHash, OPNS_DIFFICULTY } from './opnsPow.js';
 import { buildMintOutputs, estimateUnlockLength, isCharClaimed, miningPath, verifyCovenantSpend } from './opnsMint.js';
-import { mineName, NameTakenError, MiningCancelled, type MineChar } from './opnsRegister.js';
+import { findChildBackwards, mineName, NameTakenError, MiningCancelled, type MineChar } from './opnsRegister.js';
 import type { Fetch } from './services.js';
 
 // Golden vector from @1sat/templates (b-open-io/1sat-sdk packages/templates/src/opns/testdata):
@@ -239,6 +239,60 @@ describe('mineName orchestration', () => {
     );
     expect(minted).toEqual([`${txid}.1->danie`]);
     expect(steps.length).toBe(1);
+  });
+
+  describe('a claimed char whose child sits in an EARLIER version of the node (20 Oct 2026: mongolia, seychelles, bradley)', () => {
+    const pow = new Array(32).fill(1);
+    const G = 103; // "g"
+    const T = 116; // "t"
+    // Earlier version of "mon": this mint claimed "g", so its output 1 is the child "mong".
+    const prevTx = new Transaction();
+    prevTx.addInput({ sourceTXID: 'f'.repeat(64), sourceOutputIndex: 0, unlockingScript: new Script(), sequence: 0xffffffff });
+    prevTx.addOutput({ satoshis: 1, lockingScript: OpNS.lock(OpNS.claimBit([0], G), 'mon', pow) });
+    prevTx.addOutput({ satoshis: 1, lockingScript: OpNS.lock([0], 'mong', pow) });
+    const prevId = prevTx.id('hex');
+    // The live head of "mon": a later mint claimed "t", so ITS output 1 is "mont", not "mong". "g" is still claimed.
+    const headTx = new Transaction();
+    headTx.addInput({ sourceTXID: prevId, sourceOutputIndex: 0, unlockingScript: new Script(), sequence: 0xffffffff });
+    headTx.addOutput({ satoshis: 1, lockingScript: OpNS.lock(OpNS.claimBit(OpNS.claimBit([0], G), T), 'mon', pow) });
+    headTx.addOutput({ satoshis: 1, lockingScript: OpNS.lock([0], 'mont', pow) });
+    const headId = headTx.id('hex');
+    const headNode = { outpoint: `${headId}.0`, beef: [], tx: headTx, vout: 0, state: { claimed: OpNS.claimBit(OpNS.claimBit([0], G), T), domain: 'mon', pow } };
+
+    const chainFetch = (async (url: string) => {
+      if (url.includes('/origin/')) return new Response('', { status: 404 });
+      if (url.includes('/mine/')) return new Response(JSON.stringify({ outpoint: `${headId}.0`, domain: 'mon' }));
+      if (url.endsWith(`/tx/${prevId}/hex`)) return new Response(prevTx.toHex());
+      return new Response('', { status: 404 }); // every output is unspent
+    }) as unknown as Fetch;
+
+    test('finds the child in the earlier version and mines on from it (before: "still catching up" forever)', async () => {
+      const minted: string[] = [];
+      const steps = await mineName(
+        {
+          ctx: fakeCtx,
+          fetch: chainFetch,
+          mineChar: instantMiner,
+          load: async (_c, op) => (op === `${headId}.0` ? headNode : { ...fakeNode(op, 'mong'), tx: prevTx }),
+          mint: async (_c, n, ch) => {
+            const d = n.state.domain + String.fromCharCode(ch);
+            minted.push(`${n.outpoint}->${d}`);
+            return { txid: 'e'.repeat(64), newDomain: d, childOutpoint: `${'e'.repeat(64)}.1` };
+          },
+        },
+        'mongx',
+        new AbortController().signal,
+        () => undefined,
+      );
+      expect(minted).toEqual([`${prevId}.1->mongx`]);
+      expect(steps.length).toBe(1);
+    });
+
+    test('findChildBackwards: finds it, says null when history does not show it, and skips fresh children', async () => {
+      expect(await findChildBackwards(chainFetch, headNode, 'mong')).toBe(`${prevId}.1`);
+      expect(await findChildBackwards(chainFetch, headNode, 'monx')).toBeNull(); // nobody claimed "x"
+      expect(await findChildBackwards(chainFetch, { ...headNode, vout: 1 }, 'mong')).toBeNull();
+    });
   });
 
   test('stops with NameTakenError when the name is taken mid-mining', async () => {
