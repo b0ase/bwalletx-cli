@@ -46,6 +46,7 @@ import {
   unlistedIdFor,
 } from './opnsOutputs.js';
 import { gateAction } from '../gate.js';
+import { fastRelist, MAX_FAST_BATCH } from './fastRelist.js';
 import { tierUsd, usdToSats } from './batch.js';
 
 const safe = (s: string) => s.replace(/[^\w.-]/g, '_');
@@ -409,9 +410,15 @@ export type RelistOptions = {
   minLen?: number;
   maxLen?: number;
   dryRun?: boolean;
-  /** Pause between names (ms), default 3 s. */
+  /** Pause between names (ms), default 3 s (0.5 s with fast). */
   everyMs?: number;
+  /** One tx per name (or per batch): spend the old listing's cancel branch straight into the new listing. */
+  fast?: boolean;
+  /** With fast: names per tx (1..MAX_FAST_BATCH). */
+  batch?: number;
   log?: (line: string) => void;
+  /** tests: replaces the fast relist tx builder/sender */
+  fastRelistFn?: typeof fastRelist;
 };
 
 /**
@@ -472,7 +479,7 @@ export async function opnsRelist(o: RelistOptions) {
       appendLog(name, { at: Date.now(), action: 'opns-list', detail: `${nm} relisted for ${sats} sats ${r.txid}`, usd: 0 });
       results.push({ name: nm, action: `relisted at ${sats} sats`, txid: r.txid });
     };
-    const pause = () => new Promise((r) => setTimeout(r, o.everyMs ?? 3_000));
+    const pause = () => new Promise((r) => setTimeout(r, o.everyMs ?? (o.fast ? 500 : 3_000)));
     // Names cancelled on an earlier run whose new listing never went out.
     for (const nm of pending) {
       if (stop()) break;
@@ -488,6 +495,35 @@ export async function opnsRelist(o: RelistOptions) {
       await pause();
     }
     let i = 0;
+    if (o.fast) {
+      const size = Math.max(1, Math.min(MAX_FAST_BATCH, Math.floor(o.batch ?? 1)));
+      const send = o.fastRelistFn ?? fastRelist;
+      for (let k = 0; k < todo.length; k += size) {
+        if (stop()) return { ...summary, stoppedBy: 'stopped (bwalletx resume)', results };
+        const chunk = todo.slice(k, k + size);
+        for (const it of chunk) {
+          const refused = gate();
+          if (refused) return { ...summary, stoppedBy: refused, results };
+          log(`[${++i}/${todo.length}] ${it.name}: ${it.oldSats} → ${it.newSats} sats ($${it.newUsd})`);
+        }
+        try {
+          const r = await send(ctx, chunk.map((it) => ({ id: it.id, price: it.newSats })), { payFallback: payTo });
+          await w.sendWaiting();
+          for (const it of chunk) {
+            progress.done[it.name] = { txid: r.txid, at: Date.now(), sats: it.newSats };
+            appendLog(name, { at: Date.now(), action: 'opns-list', detail: `${it.name} relisted (fast) for ${it.newSats} sats ${r.txid}`, usd: 0 });
+            results.push({ name: it.name, action: `relisted at ${it.newSats} sats`, txid: r.txid });
+          }
+          saveRelistProgress(path, progress);
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          for (const it of chunk) results.push({ name: it.name, action: 'failed', error });
+        }
+        await pause();
+      }
+      await w.sendWaiting();
+      return { ...summary, results };
+    }
     for (const it of todo) {
       if (stop()) return { ...summary, stoppedBy: 'stopped (bwalletx resume)', results };
       const refused = gate();
