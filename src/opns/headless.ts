@@ -32,6 +32,21 @@ import { appendLedger, ledgerNames, ownerCheck } from './opnsOwner.js';
 import { fileKV, OpnsTree } from './opnsTree.js';
 import { indexerFetch } from './services.js';
 import { describeRepair } from './proofRepair.js';
+import {
+  findAfterCancel,
+  idOfOutput,
+  isListedOutput,
+  listAllPaged,
+  loadRelistProgress,
+  nameOfOutput,
+  planRelist,
+  remaining,
+  saveRelistProgress,
+  summariseRelist,
+  unlistedIdFor,
+} from './opnsOutputs.js';
+import { gateAction } from '../gate.js';
+import { tierUsd, usdToSats } from './batch.js';
 
 const safe = (s: string) => s.replace(/[^\w.-]/g, '_');
 export const statePath = (account: string) => join(home(), `opns-batch-${safe(account)}.json`);
@@ -139,25 +154,19 @@ export const oneSatServices = () => {
   } as unknown as OneSatContext['services'];
 };
 
+/** Every output in the OpNS basket (paged: the wallet can hold more than one 10,000-output page). */
+export const allOpns = (ctx: OneSatContext) =>
+  listAllPaged((offset, limit) => listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit, offset }));
+
 /** The wallet's OPNS-basket id for a name that is ours and not listed (bWalletX opnsBuy.ts opnsIdFor). */
 const opnsIdFor = async (ctx: OneSatContext, name: string): Promise<string | undefined> => {
   const r = await listOpns.execute(ctx, { names: [name], includeTags: true, limit: 50 });
   for (const o of r.outputs) {
-    if (!o.tags?.includes(`name:${name}`) || o.tags.some((t) => t.startsWith('ordlock'))) continue;
-    return o.tags.find((t) => t.startsWith('id:'))?.slice(3) ?? o.outpoint;
+    if (!o.tags?.includes(`name:${name}`) || isListedOutput(o)) continue;
+    return idOfOutput(o);
   }
   // Outputs returned by a cancelled listing carry no name: tag; their name is in customInstructions.
-  const all = await listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit: 10_000 });
-  for (const o of all.outputs) {
-    if (o.tags?.some((t) => t.startsWith('ordlock'))) continue;
-    try {
-      if ((JSON.parse(o.customInstructions ?? '') as { name?: unknown }).name !== name) continue;
-    } catch {
-      continue;
-    }
-    return o.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? o.outpoint;
-  }
-  return undefined;
+  return unlistedIdFor(await allOpns(ctx), name);
 };
 
 const listedIn = async (ctx: OneSatContext, name: string) => {
@@ -347,17 +356,8 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
   const out: { name: string; action: string; txid?: string; error?: string }[] = [];
   try {
     // Listing outputs carry no name: tag; the name lives in customInstructions (as @1sat/actions nameFromOutput reads it).
-    const outputs = (await listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit: 10_000 })).outputs;
-    const nameOf = (o2: (typeof outputs)[number]) => {
-      const t = o2.tags?.find((x) => x.startsWith('name:'))?.slice(5);
-      if (t) return t.toLowerCase();
-      try {
-        const n = (JSON.parse(o2.customInstructions ?? '') as { name?: unknown }).name;
-        return typeof n === 'string' ? n.toLowerCase() : '';
-      } catch {
-        return '';
-      }
-    };
+    const outputs = await allOpns(ctx);
+    const nameOf = nameOfOutput;
     const seen = new Set<string>();
     for (const o2 of outputs) {
       const nm = nameOf(o2);
@@ -373,11 +373,15 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
         if (c.error) throw new Error(String(c.error));
         out.push({ name: nm, action: 'unlisted', txid: c.txid });
         await w.sendWaiting();
-        // The returned output has no name: tag either; find it by the cancel txid (its vout 0).
-        const back = (await listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit: 10_000 })).outputs.find(
-          (x) => x.outpoint.startsWith(`${c.txid}.`) || x.outpoint.startsWith(`${c.txid}_`),
-        );
-        id = back?.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? back?.outpoint ?? (await opnsIdFor(ctx, nm)) ?? id;
+        // The returned output has no name: tag either; find it by the cancel txid, waiting for the wallet to ingest it.
+        const back = await findAfterCancel(() => allOpns(ctx), String(c.txid), { poke: () => w.sendWaiting() });
+        const backId = back ? idOfOutput(back) : await opnsIdFor(ctx, nm);
+        if (!backId) {
+          // Never fall back to the spent listing id: `opns send` finishes this once the output shows up.
+          out[out.length - 1] = { name: nm, action: 'unlisted (send pending)', txid: c.txid };
+          continue;
+        }
+        id = backId;
         const s = await sendOpns.execute(ctx, { id, address: o.to });
         if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
         out.push({ name: nm, action: 'sent', txid: s.txid });
@@ -395,23 +399,151 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
     await w.close();
   }
 }
+export const relistPath = (account: string) => join(home(), `opns-relist-${safe(account)}.json`);
+
+export type RelistOptions = {
+  account?: string;
+  /** Only these names (premium/offer names are relisted only when named here). */
+  names?: string[];
+  all?: boolean;
+  minLen?: number;
+  maxLen?: number;
+  dryRun?: boolean;
+  /** Pause between names (ms), default 3 s. */
+  everyMs?: number;
+  log?: (line: string) => void;
+};
+
+/**
+ * Move our OrdLock listings to the current tier price: for each one whose on-chain price differs, cancel it and
+ * list it again with the same sellOpns call the batch uses. Sequential, paced, gated as $0 list actions (kill
+ * switch, rate limit), and resumable: progress is in ~/.bwalletx/opns-relist-<account>.json.
+ */
+export async function opnsRelist(o: RelistOptions) {
+  if (!o.all && !o.names?.length) throw new Error('Pass --file <names> or --all');
+  const log = o.log ?? ((l: string) => console.log(l));
+  const { name, w } = await brc100Account(accountName(o.account));
+  w.startMonitor();
+  const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
+  const path = relistPath(name);
+  const progress = loadRelistProgress(path, name);
+  const payTo = loadState(name)?.payTo;
+  const only = o.names?.length ? new Set(o.names.map((n) => n.trim().toLowerCase()).filter(Boolean)) : undefined;
+  const results: { name: string; action: string; txid?: string; error?: string }[] = [];
+  try {
+    const rate = await bsvUsd();
+    const outputs = await allOpns(ctx);
+    const plan = planRelist(outputs, rate, { only, minLen: o.minLen, maxLen: o.maxLen });
+    const todo = remaining(plan.change, progress);
+    const pending = Object.keys(progress.pending).filter((n) => !progress.done[n] && (!only || only.has(n)));
+    const summary = {
+      account: name,
+      rate,
+      outputs: outputs.length,
+      listed: outputs.filter(isListedOutput).length,
+      toChange: plan.change.length,
+      alreadyDone: plan.change.length - todo.length,
+      atTier: plan.same,
+      premiumKept: plan.premium.length,
+      outOfRange: plan.outOfRange,
+      unknownPrice: plan.unknownPrice.length,
+      notListed: plan.notListed,
+      pendingRelist: pending,
+      byLength: summariseRelist(todo, rate),
+      progress: path,
+      stoppedBy: undefined as string | undefined,
+    };
+    if (o.dryRun) return { ...summary, dryRun: true, results };
+    const stop = () => allStopped() || !!readConfig().accounts[name]?.stopped;
+    const gate = () => {
+      const g = gateAction(name, { kind: 'list', token: 'opns', usd: 0 });
+      if (!g.ok) return `Refused: ${g.reason}`;
+      if (g.paper) return 'Paper mode: nothing is signed';
+      return null;
+    };
+    const listAt = async (nm: string, id: string) => {
+      const sats = usdToSats(tierUsd(nm), rate);
+      const r = await sellOpns.execute(ctx, { id, price: sats, ...(payTo ? { payAddress: payTo } : {}) });
+      if (r.error || !r.txid) throw new Error(String(r.error ?? 'Listing failed'));
+      await w.sendWaiting();
+      progress.done[nm] = { txid: r.txid, at: Date.now(), sats };
+      delete progress.pending[nm];
+      saveRelistProgress(path, progress);
+      appendLog(name, { at: Date.now(), action: 'opns-list', detail: `${nm} relisted for ${sats} sats ${r.txid}`, usd: 0 });
+      results.push({ name: nm, action: `relisted at ${sats} sats`, txid: r.txid });
+    };
+    const pause = () => new Promise((r) => setTimeout(r, o.everyMs ?? 3_000));
+    // Names cancelled on an earlier run whose new listing never went out.
+    for (const nm of pending) {
+      if (stop()) break;
+      const refused = gate();
+      if (refused) return { ...summary, stoppedBy: refused, results };
+      try {
+        const id = unlistedIdFor(await allOpns(ctx), nm);
+        if (!id) throw new Error(`cancel ${progress.pending[nm].cancelTxid} not in the wallet yet; run again later`);
+        await listAt(nm, id);
+      } catch (e) {
+        results.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+      }
+      await pause();
+    }
+    let i = 0;
+    for (const it of todo) {
+      if (stop()) return { ...summary, stoppedBy: 'stopped (bwalletx resume)', results };
+      const refused = gate();
+      if (refused) return { ...summary, stoppedBy: refused, results };
+      log(`[${++i}/${todo.length}] ${it.name}: ${it.oldSats} → ${it.newSats} sats ($${it.newUsd})`);
+      try {
+        const c = await cancelOpnsListing.execute(ctx, { id: it.id });
+        if (c.error || !c.txid) throw new Error(String(c.error ?? 'cancel failed'));
+        progress.pending[it.name] = { cancelTxid: c.txid, at: Date.now() };
+        saveRelistProgress(path, progress);
+        appendLog(name, { at: Date.now(), action: 'list-cancel', detail: `${it.name} (relist) ${c.txid}`, usd: 0 });
+        await w.sendWaiting();
+        const back = await findAfterCancel(() => allOpns(ctx), c.txid, { poke: () => w.sendWaiting() });
+        const id = back ? idOfOutput(back) : await opnsIdFor(ctx, it.name);
+        if (!id) {
+          results.push({ name: it.name, action: 'unlisted (relist pending)', txid: c.txid });
+          continue;
+        }
+        const refused2 = gate();
+        if (refused2) return { ...summary, stoppedBy: refused2, results };
+        await listAt(it.name, id);
+      } catch (e) {
+        results.push({ name: it.name, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+      }
+      await pause();
+    }
+    await w.sendWaiting();
+    return { ...summary, results };
+  } finally {
+    await w.close();
+  }
+}
+
 export async function opnsSweep(o: { account?: string; to: string; payTo?: string; namesOnly?: boolean; keepListed?: boolean }) {
   const { name, b, w } = await brc100Account(accountName(o.account));
   w.startMonitor();
   const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
   const out: { name: string; action: string; txid?: string; error?: string }[] = [];
   try {
-    const r = await listOpns.execute(ctx, { includeTags: true, limit: 10_000 });
-    for (const o2 of r.outputs) {
-      const nm = o2.tags?.find((t) => t.startsWith('name:'))?.slice(5) ?? o2.outpoint;
-      let id = o2.tags?.find((t) => t.startsWith('id:'))?.slice(3) ?? o2.outpoint;
+    for (const o2 of await allOpns(ctx)) {
+      const nm = nameOfOutput(o2) || o2.outpoint;
+      let id = idOfOutput(o2);
       try {
         if (o2.tags?.some((t) => t.startsWith('ordlock'))) {
           if (o.keepListed) continue;
           const c = await cancelOpnsListing.execute(ctx, { id });
           if (c.error) throw new Error(String(c.error));
           out.push({ name: nm, action: 'unlisted', txid: c.txid });
-          id = (await opnsIdFor(ctx, nm)) ?? id;
+          await w.sendWaiting();
+          const back = await findAfterCancel(() => allOpns(ctx), String(c.txid), { poke: () => w.sendWaiting() });
+          const backId = back ? idOfOutput(back) : await opnsIdFor(ctx, nm);
+          if (!backId) {
+            out[out.length - 1] = { name: nm, action: 'unlisted (send pending)', txid: c.txid };
+            continue;
+          }
+          id = backId;
         }
         const s = await sendOpns.execute(ctx, { id, address: o.to });
         if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));

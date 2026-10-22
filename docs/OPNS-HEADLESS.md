@@ -78,6 +78,31 @@ bwalletx opns sweep -a opns --to <your ordinals address> --to-pay <your BSV addr
 Cancels unsold listings, sends every name still in the agent account to `--to`, then sends the remaining sats to
 `--to-pay` (or `--to`). `--keep-listed` leaves listed names on sale; `--names-only` leaves the sats.
 
+## 5. Relist at the current tier prices
+
+Listings keep the price they were made at. After a tier change ($10 for 5+ characters, $50 for 4, $100 for 3,
+$500 for 1–2), move old listings to the new price:
+
+```sh
+bwalletx opns relist -a opns --all --dry-run          # counts by length, old → new prices; builds nothing
+bwalletx opns relist -a opns --all --min-len 5 --max-len 5 --dry-run
+bwalletx opns relist -a opns --all                    # cancel + list again, one name at a time
+bwalletx opns relist -a opns --file names.txt         # only these names
+```
+
+- Each name is cancelled, then listed again with the same call the batch uses (to the batch's pay address). It is
+  off sale for the few seconds in between, and costs two small network fees.
+- A listing priced above its tier counts as a premium/offer price and is kept, unless `--file` names it.
+- Listings within 2% of the tier price are left alone (the BSV rate moves).
+- Every cancel and listing goes through the gate as a $0 list action: the kill switch (`bwalletx stop`) and the
+  rate limit stop the run. `--every <seconds>` paces it (default 3).
+- Resumable: progress is in `~/.bwalletx/opns-relist-<account>.json`; run the same command again to carry on. A
+  name cancelled but not yet listed again (the wallet had not seen the returned output) is listed on the next run.
+
+`opns unlist` and `opns sweep` now page through every OpNS output (the wallet can hold more than 10,000), and after
+a cancel they wait up to 30 s for the returned output. If it still has not shown up the result is
+`unlisted (send pending)`; run `bwalletx opns send <to> <name>` later to finish.
+
 ## Time
 
 Measured on this Mac (Apple M4, 10 cores): **9.3 MH/s with 9 threads** (`bwalletx opns bench`), so proof of work is
