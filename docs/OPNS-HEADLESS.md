@@ -99,6 +99,28 @@ bwalletx opns relist -a opns --file names.txt         # only these names
 - Resumable: progress is in `~/.bwalletx/opns-relist-<account>.json`; run the same command again to carry on. A
   name cancelled but not yet listed again (the wallet had not seen the returned output) is listed on the next run.
 
+### Fast mode (`--fast`, one tx per name)
+
+```sh
+bwalletx opns relist -a opns --fast --file 5names.txt --dry-run   # plan
+bwalletx opns relist -a opns --fast --file 5names.txt             # recommended first live test
+bwalletx opns relist -a opns --all --fast                         # then everything
+bwalletx opns relist -a opns --all --fast --batch 10              # optional: 10 names per tx
+```
+
+- One transaction per name: the old OrdLock v2 listing is spent through its cancel (owner) branch and the new
+  listing of the same ordinal is created in the same tx, at the tier price, paid to the **same address** the old
+  listing paid (falls back to the batch pay address only if the old payout is not a plain P2PKH). Fee and change
+  come from the wallet. No waiting for a returned output, one fee instead of two, and the name is never unlisted.
+- The new output is filed exactly like `sellOpns` files a listing (basket `opns`, tags `opns`/origin/type/
+  `ordlock2`/`price:<sats>`, a fresh `id:` tag, customInstructions keyed by the spent listing outpoint), so
+  `opns status`, the store inventory and later relists see it as a normal listing.
+- `--batch N` (1–25, default 1) puts N names in one tx (input i → output i). If any one fails the whole tx fails
+  and those names stay on their old listing; rerun to retry. Start with `--batch 1`.
+- Gate, kill switch, 2% tolerance, premium rule, `--dry-run` and the progress file work as above (each name's
+  relist txid is recorded; batch names share a txid). `--every` defaults to 0.5 s in fast mode.
+- Only OrdLock v2 listings (everything `sellOpns` made); an older v1 listing fails with a hint to run without `--fast`.
+
 `opns unlist` and `opns sweep` now page through every OpNS output (the wallet can hold more than 10,000), and after
 a cancel they wait up to 30 s for the returned output. If it still has not shown up the result is
 `unlisted (send pending)`; run `bwalletx opns send <to> <name>` later to finish.
