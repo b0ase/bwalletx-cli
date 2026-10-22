@@ -622,6 +622,44 @@ opns
     }),
   );
 opns
+  .command('relist')
+  .description('move our OpNS sale listings to the current tier price ($10 / $50 / $100 / $500 by length): cancel, list again')
+  .option('--file <path>', 'only these names (one per line); names priced above their tier are relisted only when named here')
+  .option('--all', 'every listing whose price differs from its tier (premium-priced listings are kept)')
+  .option('--min-len <n>', 'only names at least this long')
+  .option('--max-len <n>', 'only names at most this long')
+  .option('--every <seconds>', 'pause between names', '3')
+  .option('-a, --account <name>', 'agent account')
+  .option('-y, --yes', 'no confirmation prompt')
+  .option('--dry-run', 'count what would change and show old → new prices; build nothing')
+  .action(
+    run(async (o: { file?: string; all?: boolean; minLen?: string; maxLen?: string; every: string; account?: string; yes?: boolean; dryRun?: boolean }) => {
+      if (!o.file && !o.all) throw new Error('Pass --file <names> or --all');
+      const { readFileSync } = await import('node:fs');
+      const names = o.file ? readFileSync(o.file, 'utf8').split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#')) : undefined;
+      const { opnsRelist } = await import('./opns/headless.js');
+      const base = { account: o.account, names, all: o.all, minLen: o.minLen ? Number(o.minLen) : undefined, maxLen: o.maxLen ? Number(o.maxLen) : undefined, everyMs: Number(o.every) * 1000 };
+      const plan = await opnsRelist({ ...base, dryRun: true });
+      const head = [
+        `${plan.account}: ${plan.outputs} OpNS outputs, ${plan.listed} listed · BSV $${plan.rate.toFixed(2)}`,
+        `  to relist: ${plan.toChange - plan.alreadyDone} (done on earlier runs: ${plan.alreadyDone}) · already at tier: ${plan.atTier} · premium kept: ${plan.premiumKept} · out of length range: ${plan.outOfRange} · no price tag: ${plan.unknownPrice}`,
+        ...plan.byLength.map((b) => `  length ${b.length}: ${b.count} × ${b.oldSats} sats (${b.oldUsd}) → ${b.newSats} sats ($${b.newUsd})`),
+        plan.pendingRelist.length ? `  cancelled earlier, still to list: ${plan.pendingRelist.length}` : '',
+        plan.notListed.length ? `  not listed here: ${plan.notListed.slice(0, 20).join(', ')}${plan.notListed.length > 20 ? '…' : ''}` : '',
+        `  progress: ${plan.progress}`,
+      ].filter(Boolean).join('\n');
+      if (o.dryRun) return print(plan, () => head);
+      console.log(head);
+      const n = plan.toChange - plan.alreadyDone + plan.pendingRelist.length;
+      if (!n) return console.log('Nothing to relist.');
+      if (!o.yes && !process.env.BWALLETX_YES && !(await confirm(`Cancel and relist ${n} names (two network fees each; each name is briefly unlisted)?`))) return console.log('Cancelled.');
+      const r = await opnsRelist(base);
+      for (const x of r.results) console.log(x.txid ? `${x.name}: ${x.action} ${x.txid}` : x.error ? `${x.name}: FAILED ${x.error}` : `${x.name}: ${x.action}`);
+      if (r.stoppedBy) console.log(`Stopped: ${r.stoppedBy}. Run the same command to resume.`);
+      if (r.results.some((x) => x.action === 'failed')) process.exitCode = 1;
+    }),
+  );
+opns
   .command('sweep')
   .description('give it all back: cancel unsold listings, send every name in the agent wallet to --to, withdraw the remaining sats')
   .option('-a, --account <name>', 'agent account')
