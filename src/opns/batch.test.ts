@@ -99,11 +99,11 @@ describe('lists', () => {
 
 describe('tier pricing', () => {
   test('5+ chars $1, 4 chars $5, 3 or fewer $15', () => {
-    expect(tierUsd('alice')).toBe(1);
-    expect(tierUsd('longername')).toBe(1);
-    expect(tierUsd('abcd')).toBe(5);
-    expect(tierUsd('abc')).toBe(15);
-    expect(tierUsd('ab')).toBe(15);
+    expect(tierUsd('alice')).toBe(10);
+    expect(tierUsd('longername')).toBe(10);
+    expect(tierUsd('abcd')).toBe(50);
+    expect(tierUsd('abc')).toBe(100);
+    expect(tierUsd('ab')).toBe(500);
   });
   test('USD → sats rounds up at the live rate', () => {
     expect(usdToSats(1, 50)).toBe(2_000_000);
@@ -114,9 +114,9 @@ describe('tier pricing', () => {
     const h = harness();
     await runHeadless(h.deps, state(['abc', 'abcd', 'abcde']), h.ctl.signal);
     expect(h.listed).toEqual([
-      { name: 'abc', sats: 30_000_000 },
-      { name: 'abcd', sats: 10_000_000 },
-      { name: 'abcde', sats: 2_000_000 },
+      { name: 'abc', sats: 200_000_000 },
+      { name: 'abcd', sats: 100_000_000 },
+      { name: 'abcde', sats: 20_000_000 },
     ]);
   });
 });

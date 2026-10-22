@@ -81,8 +81,9 @@ export const buildQueue = (lists: string[][], vault: string[] = [], gift: string
 
 // ---- prices -------------------------------------------------------------------------------------------
 
-/** Listing tier by length (owner, 13 Oct): 5+ chars $1, 4 chars $5, 3 chars or fewer $15. */
-export const tierUsd = (name: string): number => (name.length >= 5 ? 1 : name.length === 4 ? 5 : 15);
+/** Listing tier by length (owner, 22 Oct): 5+ chars $10, 4 chars $50, 3 chars $100, 1–2 chars $500. */
+export const tierUsd = (name: string): number =>
+  name.length >= 5 ? 10 : name.length === 4 ? 50 : name.length === 3 ? 100 : 500; // owner, 22 Oct 2026
 
 /** Whole sats for `usd` at `rate` USD/BSV, rounded up so the seller never gets less than asked. */
 export const usdToSats = (usd: number, rate: number): number => {
