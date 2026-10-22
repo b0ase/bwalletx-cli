@@ -70,7 +70,9 @@ describe('rate limit', () => {
     expect(rateLimited([...log, { at: NOW, action: 'refused', detail: '', usd: 0 }], NOW)).toBe(false);
     const full = [...log, spend(NOW - 5)];
     expect(rateLimited(full, NOW)).toBe(true);
-    expect(evaluateGate(input({ log: full }))).toMatchObject({ ok: false, rule: 'rateLimit' });
+    expect(evaluateGate(input({ log: full }))).toMatchObject({ ok: false, rule: 'rateLimit' }); // default
+    expect(evaluateGate(input({ log: full, account: acct({ ratePerHour: 0 }) })).ok).toBe(true); // owner turned it off
+    expect(evaluateGate(input({ log: full, account: acct({ ratePerHour: 1000 }) })).ok).toBe(true); // owner raised it
     expect(rateLimited(full, NOW + 3_600_000 + 1000 * RATE_LIMIT_PER_HOUR)).toBe(false);
   });
 });

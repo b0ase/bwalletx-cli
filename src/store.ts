@@ -22,6 +22,8 @@ export type AccountConfig = {
   ordAddress: string;
   /** Per-account daily cap in USD; null = none (the balance is the limit). */
   dailyCapUsd: number | null;
+  /** Spending actions per hour for this account: unset = default (30), 0 = no limit (set by the owner). */
+  ratePerHour?: number | null;
   /**
    * Spends above this many USD are refused with rule "approval": the owner approves them in bAgents.
    * null/absent = no threshold (only the daily cap applies).

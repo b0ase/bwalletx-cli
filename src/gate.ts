@@ -1,6 +1,6 @@
 /**
  * The one gate every spending action passes, from the CLI, `agent run` and MCP alike:
- *   kill switch / account stopped → daily cap → rate limit → loaded strategy's rules → (paper) fill.
+ *   kill switch / account stopped → daily cap → rate limit (default, or the account's own) → loaded strategy's rules → (paper) fill.
  * Same order and rules as the app's checkAgentAction. Refusals are logged with the rule that refused.
  * In paper mode an allowed action is filled on the paper book and logged, and the caller must NOT sign.
  */
@@ -18,6 +18,7 @@ import {
 } from './strategy.js';
 import { allStopped, appendLog, getLoaded, getPaper, readLog, resolveAccount, setPaper, type AccountConfig } from './store.js';
 
+/** Default spending actions per hour; an account can set its own (`bwalletx ratelimit <account> <n|off>`). */
 export const RATE_LIMIT_PER_HOUR = 30;
 const HOUR = 3_600_000;
 
@@ -61,7 +62,9 @@ export const evaluateGate = ({ account, stopAll, log, loaded, book, action: a, e
   // Bigger spends wait for the owner (bAgents approvals). Paper fills never need it.
   const limit = account?.approveAboveUsd;
   if (!paper && limit != null && a.usd > limit) return refuse(`Needs owner approval: over $${limit} per action`, 'approval');
-  if (rateLimited(log, now)) return refuse(`Rate limit: at most ${RATE_LIMIT_PER_HOUR} spending actions per hour`, 'rateLimit');
+  // Per-account override: a number sets the limit, 0 turns it off for that account (owner-set), unset = default.
+  const rate = account?.ratePerHour ?? RATE_LIMIT_PER_HOUR;
+  if (rate > 0 && rateLimited(log, now, rate)) return refuse(`Rate limit: at most ${rate} spending actions per hour`, 'rateLimit');
   if (!loaded) return { ok: true, paper: false };
 
   const st: RuleState = paper

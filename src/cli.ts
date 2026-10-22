@@ -165,6 +165,19 @@ program
   );
 
 program
+  .command('ratelimit <account> <perHour>')
+  .description('spending actions per hour for one account (a number, "off" = no limit, "default" = 30)')
+  .action(
+    run((name: string, v: string) => {
+      resolveAccount(name);
+      const n = v === 'off' ? 0 : v === 'default' ? null : Number(v);
+      if (n !== null && !(Number.isInteger(n) && n >= 0)) throw new Error('Rate must be a whole number, "off" or "default"');
+      updateAccount(name, { ratePerHour: n });
+      console.log(n === 0 ? `${name}: no rate limit` : n ? `${name}: at most ${n} spending actions per hour` : `${name}: default rate limit`);
+    }),
+  );
+
+program
   .command('cap <account> <usdPerDay>')
   .description('set an account daily cap in USD ("off" to clear)')
   .action(
