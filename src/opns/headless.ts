@@ -32,6 +32,8 @@ import { appendLedger, ledgerNames, ownerCheck } from './opnsOwner.js';
 import { fileKV, OpnsTree } from './opnsTree.js';
 import { indexerFetch } from './services.js';
 import { describeRepair } from './proofRepair.js';
+import { beefDepthHelp, describeSync, retryOnBeefDepth } from './proofSync.js';
+import type { AgentWallet } from '../brc100.js';
 import {
   findAfterCancel,
   idOfOutput,
@@ -159,6 +161,25 @@ export const oneSatServices = () => {
 export const allOpns = (ctx: OneSatContext) =>
   listAllPaged((offset, limit) => listOpns.execute(ctx, { includeTags: true, includeCustomInstructions: true, limit, offset }));
 
+/**
+ * Fetch merkle proofs for the wallet's unproven txs before spending (read-only; once per command). Without it a
+ * long run of change-spending txs that are long mined still counts as unproven and createAction fails with
+ * "Maximum BEEF depth exceeded".
+ */
+export const syncFirst = async (w: Pick<AgentWallet, 'syncProofs'>, log: (l: string) => void = (l) => console.error(l)) => {
+  if (!w.syncProofs) return;
+  try {
+    log(describeSync(await w.syncProofs()));
+  } catch (e) {
+    log(`Proof sync skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+};
+
+/** For retryOnBeefDepth: sync proofs (errors swallowed; the retry reports the real failure). */
+const syncer = (w: Pick<AgentWallet, 'syncProofs'>) => (w.syncProofs ? () => w.syncProofs!().catch(() => undefined) : undefined);
+
+const failMsg = (e: unknown) => beefDepthHelp(e instanceof Error ? e.message : String(e));
+
 /** The wallet's OPNS-basket id for a name that is ours and not listed (bWalletX opnsBuy.ts opnsIdFor). */
 const opnsIdFor = async (ctx: OneSatContext, name: string): Promise<string | undefined> => {
   const r = await listOpns.execute(ctx, { names: [name], includeTags: true, limit: 50 });
@@ -242,6 +263,8 @@ export async function opnsMint(o: MintOptions): Promise<RunResult> {
   heartbeat.unref();
   // A proof the wallet took from a block that lost a reorg makes every new mint fail ("merged Beef failed
   // validation"): check the stored proofs against the chain before mining (read-only lookups, nothing broadcast).
+  doing = 'fetching wallet proofs';
+  await syncFirst(w, log);
   if (w.repairProofs) {
     doing = 'checking wallet proofs';
     const r = await w.repairProofs().catch((e: unknown) => {
@@ -352,6 +375,7 @@ export function opnsStatus(account?: string) {
 export async function opnsUnlist(o: { account?: string; names: string[]; to: string; dryRun?: boolean }) {
   const { name, w } = await brc100Account(accountName(o.account));
   w.startMonitor();
+  await syncFirst(w);
   const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
   const want = new Set(o.names.map((n) => n.trim().toLowerCase()).filter(Boolean));
   const out: { name: string; action: string; txid?: string; error?: string }[] = [];
@@ -370,7 +394,7 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
         continue;
       }
       try {
-        const c = await cancelOpnsListing.execute(ctx, { id });
+        const c = await retryOnBeefDepth(() => cancelOpnsListing.execute(ctx, { id }), syncer(w));
         if (c.error) throw new Error(String(c.error));
         out.push({ name: nm, action: 'unlisted', txid: c.txid });
         await w.sendWaiting();
@@ -383,12 +407,12 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
           continue;
         }
         id = backId;
-        const s = await sendOpns.execute(ctx, { id, address: o.to });
+        const s = await retryOnBeefDepth(() => sendOpns.execute(ctx, { id, address: o.to }), syncer(w));
         if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
         out.push({ name: nm, action: 'sent', txid: s.txid });
         appendLog(name, { at: Date.now(), action: 'opns-unlist', detail: `${nm} → ${o.to} ${s.txid}`, usd: 0 });
       } catch (e) {
-        out.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+        out.push({ name: nm, action: 'failed', error: failMsg(e) });
       }
     }
     for (const nm of want) if (!seen.has(nm)) out.push({ name: nm, action: 'not listed here' });
@@ -400,6 +424,9 @@ export async function opnsUnlist(o: { account?: string; names: string[]; to: str
     await w.close();
   }
 }
+/** Fast relist: fetch proofs after this many txs. */
+export const FAST_SYNC_EVERY = 6;
+
 export const relistPath = (account: string) => join(home(), `opns-relist-${safe(account)}.json`);
 
 export type RelistOptions = {
@@ -431,6 +458,7 @@ export async function opnsRelist(o: RelistOptions) {
   const log = o.log ?? ((l: string) => console.log(l));
   const { name, w } = await brc100Account(accountName(o.account));
   w.startMonitor();
+  await syncFirst(w, log);
   const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
   const path = relistPath(name);
   const progress = loadRelistProgress(path, name);
@@ -470,7 +498,7 @@ export async function opnsRelist(o: RelistOptions) {
     };
     const listAt = async (nm: string, id: string) => {
       const sats = usdToSats(tierUsd(nm), rate);
-      const r = await sellOpns.execute(ctx, { id, price: sats, ...(payTo ? { payAddress: payTo } : {}) });
+      const r = await retryOnBeefDepth(() => sellOpns.execute(ctx, { id, price: sats, ...(payTo ? { payAddress: payTo } : {}) }), syncer(w), log);
       if (r.error || !r.txid) throw new Error(String(r.error ?? 'Listing failed'));
       await w.sendWaiting();
       progress.done[nm] = { txid: r.txid, at: Date.now(), sats };
@@ -490,7 +518,7 @@ export async function opnsRelist(o: RelistOptions) {
         if (!id) throw new Error(`cancel ${progress.pending[nm].cancelTxid} not in the wallet yet; run again later`);
         await listAt(nm, id);
       } catch (e) {
-        results.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+        results.push({ name: nm, action: 'failed', error: failMsg(e) });
       }
       await pause();
     }
@@ -498,6 +526,7 @@ export async function opnsRelist(o: RelistOptions) {
     if (o.fast) {
       const size = Math.max(1, Math.min(MAX_FAST_BATCH, Math.floor(o.batch ?? 1)));
       const send = o.fastRelistFn ?? fastRelist;
+      let sent = 0;
       for (let k = 0; k < todo.length; k += size) {
         if (stop()) return { ...summary, stoppedBy: 'stopped (bwalletx resume)', results };
         const chunk = todo.slice(k, k + size);
@@ -507,7 +536,7 @@ export async function opnsRelist(o: RelistOptions) {
           log(`[${++i}/${todo.length}] ${it.name}: ${it.oldSats} → ${it.newSats} sats ($${it.newUsd})`);
         }
         try {
-          const r = await send(ctx, chunk.map((it) => ({ id: it.id, price: it.newSats })), { payFallback: payTo });
+          const r = await retryOnBeefDepth(() => send(ctx, chunk.map((it) => ({ id: it.id, price: it.newSats })), { payFallback: payTo }), syncer(w), log);
           await w.sendWaiting();
           for (const it of chunk) {
             progress.done[it.name] = { txid: r.txid, at: Date.now(), sats: it.newSats };
@@ -516,10 +545,13 @@ export async function opnsRelist(o: RelistOptions) {
           }
           saveRelistProgress(path, progress);
         } catch (e) {
-          const error = e instanceof Error ? e.message : String(e);
+          const error = failMsg(e);
           for (const it of chunk) results.push({ name: it.name, action: 'failed', error });
         }
         await pause();
+        // Each fast tx spends the last one's change: pick up proofs for whatever has been mined so the unproven
+        // chain stays under the wallet's BEEF depth limit (12).
+        if (++sent % FAST_SYNC_EVERY === 0) await syncFirst(w, log);
       }
       await w.sendWaiting();
       return { ...summary, results };
@@ -530,7 +562,7 @@ export async function opnsRelist(o: RelistOptions) {
       if (refused) return { ...summary, stoppedBy: refused, results };
       log(`[${++i}/${todo.length}] ${it.name}: ${it.oldSats} → ${it.newSats} sats ($${it.newUsd})`);
       try {
-        const c = await cancelOpnsListing.execute(ctx, { id: it.id });
+        const c = await retryOnBeefDepth(() => cancelOpnsListing.execute(ctx, { id: it.id }), syncer(w), log);
         if (c.error || !c.txid) throw new Error(String(c.error ?? 'cancel failed'));
         progress.pending[it.name] = { cancelTxid: c.txid, at: Date.now() };
         saveRelistProgress(path, progress);
@@ -546,7 +578,7 @@ export async function opnsRelist(o: RelistOptions) {
         if (refused2) return { ...summary, stoppedBy: refused2, results };
         await listAt(it.name, id);
       } catch (e) {
-        results.push({ name: it.name, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+        results.push({ name: it.name, action: 'failed', error: failMsg(e) });
       }
       await pause();
     }
@@ -560,6 +592,7 @@ export async function opnsRelist(o: RelistOptions) {
 export async function opnsSweep(o: { account?: string; to: string; payTo?: string; namesOnly?: boolean; keepListed?: boolean }) {
   const { name, b, w } = await brc100Account(accountName(o.account));
   w.startMonitor();
+  await syncFirst(w);
   const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
   const out: { name: string; action: string; txid?: string; error?: string }[] = [];
   try {
@@ -569,7 +602,7 @@ export async function opnsSweep(o: { account?: string; to: string; payTo?: strin
       try {
         if (o2.tags?.some((t) => t.startsWith('ordlock'))) {
           if (o.keepListed) continue;
-          const c = await cancelOpnsListing.execute(ctx, { id });
+          const c = await retryOnBeefDepth(() => cancelOpnsListing.execute(ctx, { id }), syncer(w));
           if (c.error) throw new Error(String(c.error));
           out.push({ name: nm, action: 'unlisted', txid: c.txid });
           await w.sendWaiting();
@@ -581,12 +614,12 @@ export async function opnsSweep(o: { account?: string; to: string; payTo?: strin
           }
           id = backId;
         }
-        const s = await sendOpns.execute(ctx, { id, address: o.to });
+        const s = await retryOnBeefDepth(() => sendOpns.execute(ctx, { id, address: o.to }), syncer(w));
         if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
         out.push({ name: nm, action: 'sent', txid: s.txid });
         appendLog(name, { at: Date.now(), action: 'opns-sweep', detail: `${nm} → ${o.to} ${s.txid}`, usd: 0 });
       } catch (e) {
-        out.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+        out.push({ name: nm, action: 'failed', error: failMsg(e) });
       }
     }
     await w.sendWaiting();
@@ -632,6 +665,7 @@ const giftOutpoint = async (account: string, nm: string, ordAddress: string): Pr
 export async function opnsSend(o: { account?: string; names: string[]; to: string; dryRun?: boolean }) {
   const { name, keys, b, w } = await brc100Account(accountName(o.account));
   w.startMonitor();
+  await syncFirst(w);
   const ctx: OneSatContext = { wallet: w.wallet as unknown as WalletInterface, chain: 'main', services: oneSatServices(), dataDir: home(), isBaseWallet: true };
   const ordKey = PrivateKey.fromWif(keys.ordPk);
   const payKey = PrivateKey.fromWif(keys.payPk);
@@ -664,7 +698,7 @@ export async function opnsSend(o: { account?: string; names: string[]; to: strin
             out.push({ name: nm, action: 'would send (wallet basket)' });
             continue;
           }
-          const s = await sendOpns.execute(ctx, { id, address: o.to });
+          const s = await retryOnBeefDepth(() => sendOpns.execute(ctx, { id, address: o.to }), syncer(w));
           if (s.error || !s.txid) throw new Error(String(s.error ?? 'send failed'));
           out.push({ name: nm, action: 'sent', txid: s.txid });
           appendLog(name, { at: Date.now(), action: 'opns-send', detail: `${nm} → ${o.to} ${s.txid}`, usd: 0 });
@@ -689,11 +723,26 @@ export async function opnsSend(o: { account?: string; names: string[]; to: strin
         out.push({ name: nm, action: 'sent', txid });
         appendLog(name, { at: Date.now(), action: 'opns-send', detail: `${nm} → ${o.to} ${txid}`, usd: 0 });
       } catch (e) {
-        out.push({ name: nm, action: 'failed', error: e instanceof Error ? e.message : String(e) });
+        out.push({ name: nm, action: 'failed', error: failMsg(e) });
       }
     }
     await w.sendWaiting();
     return { account: name, names: out };
+  } finally {
+    await w.close();
+  }
+}
+
+/**
+ * `bwalletx sync`: fetch merkle proofs for the wallet's unproven transactions and mark them completed, then check
+ * stored proofs against the chain (reorgs). Read-only lookups: nothing is signed or broadcast.
+ */
+export async function walletSync(account?: string) {
+  const { name, w } = await brc100Account(accountName(account));
+  try {
+    const sync = w.syncProofs ? await w.syncProofs() : null;
+    const repair = w.repairProofs ? await w.repairProofs().catch(() => null) : null;
+    return { account: name, sync, repair };
   } finally {
     await w.close();
   }
