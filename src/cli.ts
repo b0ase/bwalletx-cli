@@ -425,6 +425,19 @@ const stopAll = (on: boolean) => () => {
   for (const n of Object.keys(readConfig().accounts)) appendLog(n, { at: Date.now(), action: on ? 'stop' : 'resume', detail: on ? 'All agents stopped' : 'All agents resumed', usd: 0 });
   console.log(on ? 'All agents stopped. Every spending action is refused until `bwalletx resume`.' : allStopped() ? 'Still stopped?' : 'Resumed.');
 };
+program
+  .command('sync')
+  .description("fetch merkle proofs for the agent wallet's unproven txs (fixes \"Maximum BEEF depth exceeded\"); nothing is broadcast")
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const { walletSync } = await import('./opns/headless.js');
+      const { describeSync } = await import('./opns/proofSync.js');
+      const { describeRepair } = await import('./opns/proofRepair.js');
+      const r = await walletSync(o.account);
+      print(r, () => [r.sync ? describeSync(r.sync) : 'proof sync: not available for this wallet', r.repair ? describeRepair(r.repair) : ''].filter(Boolean).join('\n'));
+    }),
+  );
 program.command('stop').description('kill switch: refuse every spending action').action(run(stopAll(true)));
 program.command('resume').description('turn the kill switch off').action(run(stopAll(false)));
 
@@ -674,6 +687,19 @@ opns
       for (const x of r.results) console.log(x.txid ? `${x.name}: ${x.action} ${x.txid}` : x.error ? `${x.name}: FAILED ${x.error}` : `${x.name}: ${x.action}`);
       if (r.stoppedBy) console.log(`Stopped: ${r.stoppedBy}. Run the same command to resume.`);
       if (r.results.some((x) => x.action === 'failed')) process.exitCode = 1;
+    }),
+  );
+opns
+  .command('sync')
+  .description("fetch merkle proofs for the agent wallet's unproven txs (fixes \"Maximum BEEF depth exceeded\"); nothing is broadcast")
+  .option('-a, --account <name>', 'agent account')
+  .action(
+    run(async (o: { account?: string }) => {
+      const { walletSync } = await import('./opns/headless.js');
+      const { describeSync } = await import('./opns/proofSync.js');
+      const { describeRepair } = await import('./opns/proofRepair.js');
+      const r = await walletSync(o.account);
+      print(r, () => [r.sync ? describeSync(r.sync) : 'proof sync: not available for this wallet', r.repair ? describeRepair(r.repair) : ''].filter(Boolean).join('\n'));
     }),
   );
 opns

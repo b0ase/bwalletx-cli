@@ -23,6 +23,10 @@ import { appendLog, home, withSpendLock } from './store.js';
 import { utxos } from './wallet.js';
 import type { AgentKeys } from './keyfile.js';
 import { repairStaleProofs, type RepairResult } from './opns/proofRepair.js';
+import { syncProofs, type SyncResult } from './opns/proofSync.js';
+
+/** proven_tx_reqs statuses still waiting for a merkle proof (toolbox TaskCheckForProofs / TaskCheckNoSends). */
+const UNPROVEN = ['callback', 'unmined', 'sending', 'unknown', 'unconfirmed', 'nosend'];
 
 export const BRC100_PORT = 3321;
 
@@ -44,6 +48,8 @@ export type AgentWallet = {
   startMonitor: () => void;
   /** Re-check stored merkle proofs against the chain and re-prove any from an orphaned block (see opns/proofRepair.ts). */
   repairProofs?: () => Promise<RepairResult>;
+  /** Fetch merkle proofs for the wallet's unproven txs and mark them completed (see opns/proofSync.ts). */
+  syncProofs?: () => Promise<SyncResult>;
   close: () => Promise<void>;
 };
 
@@ -120,6 +126,19 @@ export async function openWallet(account: string, keys: AgentKeys): Promise<Agen
         },
       });
     },
+    syncProofs: () =>
+      syncProofs({
+        unproven: async () => {
+          const r = (await knex('proven_tx_reqs').whereIn('status', UNPROVEN).count({ n: '*' })) as { n: number | string }[];
+          return Number(r[0]?.n ?? 0);
+        },
+        tip: async () => {
+          const h = await monitor.chaintracks.findChainTipHeader();
+          return h as unknown as { height: number; hash: string };
+        },
+        newHeader: (h) => monitor.processNewBlockHeader(h as never),
+        runTask: (t) => monitor.runTask(t),
+      }),
     close: async () => {
       await monitor.destroy().catch(() => undefined);
       await wallet.destroy().catch(() => undefined);
