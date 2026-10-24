@@ -64,7 +64,7 @@ type WithdrawWallet = Pick<AgentWallet, 'wallet' | 'sendWaiting'>;
 export function withdrawFrom(
   name: string,
   w: WithdrawWallet,
-  o: { amount: number | 'all'; address: string; have: number; rate: number; relay?: (r: unknown) => Promise<unknown> },
+  o: { amount: number | 'all'; address: string; have: number; rate: number; relay?: (r: unknown) => Promise<unknown>; maxUsd?: number },
 ) {
   return withSpendLock(name, () => withdrawLocked(name, w, o));
 }
@@ -72,12 +72,13 @@ export function withdrawFrom(
 async function withdrawLocked(
   name: string,
   w: WithdrawWallet,
-  o: { amount: number | 'all'; address: string; have: number; rate: number; relay?: (r: unknown) => Promise<unknown> },
+  o: { amount: number | 'all'; address: string; have: number; rate: number; relay?: (r: unknown) => Promise<unknown>; maxUsd?: number },
 ) {
   if (o.amount !== 'all' && !(Number.isFinite(o.amount) && o.amount > 0)) throw new Error('Give an amount in dollars, e.g. 5, or "all".');
   const sats = o.amount === 'all' ? o.have - 300 : Math.round((o.amount / o.rate) * 1e8);
   if (!(sats > 0) || sats > o.have) throw new Error(`Can't send ${sats} sats: the wallet holds ${o.have}`);
   const usd = (sats / 1e8) * o.rate;
+  if (o.maxUsd !== undefined && usd > o.maxUsd + 1e-9) throw new Error(`Refused: $${usd.toFixed(2)} is over the $${o.maxUsd} per-call limit (BWALLETX_MCP_MAX_USD)`);
   const g = gateAction(name, { kind: 'send', token: 'BSV', usd, to: o.address });
   if (!g.ok) throw new Error(`Refused: ${g.reason}`);
   if (g.paper) throw new Error('Paper mode: nothing is signed');
@@ -91,12 +92,12 @@ async function withdrawLocked(
   return { txid: r.txid, sats };
 }
 
-export async function brc100Withdraw(amount: number | 'all', address: string, account?: string, shared = false) {
+export async function brc100Withdraw(amount: number | 'all', address: string, account?: string, shared = false, maxUsd?: number) {
   const { name, b, w } = await brc100Account(account, shared);
   try {
     const rate = await bsvUsd();
     const have = await b.walletBalance(w);
-    return await withdrawFrom(name, w, { amount, address, have, rate, relay: b.relayToArc });
+    return await withdrawFrom(name, w, { amount, address, have, rate, relay: b.relayToArc, maxUsd });
   } finally {
     await w.close();
   }

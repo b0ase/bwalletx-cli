@@ -408,6 +408,12 @@ export type ServeOptions = {
   sessionBudgetUsd?: number;
   /** Allow `--origin '*'` (any web page on this machine can drive the wallet). Off by default. */
   allowAnyOrigin?: boolean;
+  /**
+   * Let sites move tokens/ordinals: createActions with BSV-20/21 inscribed outputs or that name the
+   * wallet's own outputs as inputs. Off by default: the caps value satoshis only, and a token output
+   * is 1 sat however much the token is worth, so these would otherwise slip under every cap.
+   */
+  allowTokenTransfers?: boolean;
 };
 
 /**
@@ -415,6 +421,15 @@ export type ServeOptions = {
  * with no daily cap and no approval threshold must not be drainable by one 402 asking for everything.
  */
 export const SERVE_MAX_USD_PER_ACTION = 1;
+
+/** Does any output carry a BSV-20/21 inscription (the token transfer JSON inside an ord envelope)? */
+const BSV20_MARK = Buffer.from('"p":"bsv-20"').toString('hex');
+export const hasTokenOutputs = (args: CreateActionArgs) =>
+  (args.outputs ?? []).some((o) => typeof o.lockingScript === 'string' && o.lockingScript.toLowerCase().includes(BSV20_MARK));
+
+/** Outpoints the site named that are the wallet's own (its tokens, ordinals or coins). */
+export const namedOwnedInputs = (args: CreateActionArgs, owned: ReadonlySet<string>) =>
+  (args.inputs ?? []).map((i) => i.outpoint).filter((op) => owned.has(op));
 export const SERVE_SESSION_BUDGET_USD = 5;
 
 /**
@@ -507,6 +522,13 @@ export async function serve(input: AgentWallet | ServeWallet, o: ServeOptions) {
       const a = args as unknown as CreateActionArgs;
       const owned = a.inputs?.length && w.owned ? await w.owned().catch(() => null) : new Set<string>();
       if (!owned) return send(res, 503, refusal('bwalletx serve: could not read the wallet to check inputs; try again'), origin);
+      if (!o.allowTokenTransfers) {
+        const mine = namedOwnedInputs(a, owned);
+        if (hasTokenOutputs(a) || mine.length) {
+          say(`REFUSED ${host} createAction: moves tokens/ordinals (${mine.length ? `spends wallet outputs ${mine.join(', ')}` : 'BSV-21 inscribed output'}), which the USD caps cannot value`);
+          return send(res, 400, refusal('bWalletX agent refused: this payment moves tokens or ordinals, which the spending caps cannot value; restart serve with --allow-token-transfers to permit it'), origin);
+        }
+      }
       sats = outgoingSats(a, owned);
       const usd = sats ? (sats / 1e8) * (await price()) : 0;
       if (usd > maxPerAction + 1e-9) {

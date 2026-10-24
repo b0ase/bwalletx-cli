@@ -36,6 +36,19 @@ export type AccountConfig = {
   stopped: boolean;
   importedAt: number;
 };
+/**
+ * Daily cap (USD, per UTC day) a NEW account starts with (24 Oct 2026 audit): before this, new accounts
+ * had no cap and an agent or MCP client could send the whole balance. Raise or clear with `bwalletx cap`.
+ * Accounts that already exist keep whatever they had.
+ */
+export const DEFAULT_DAILY_CAP_USD = 10;
+
+/** Most one MCP `send` / `brc100_withdraw` call may move, in USD, whatever the account caps say. */
+export const mcpMaxUsdPerCall = (env: Record<string, string | undefined> = process.env) => {
+  const v = Number(env.BWALLETX_MCP_MAX_USD);
+  return env.BWALLETX_MCP_MAX_USD !== undefined && Number.isFinite(v) && v >= 0 ? v : 5;
+};
+
 export type Config = { defaultAccount?: string; accounts: Record<string, AccountConfig>; satsPerKb?: number };
 
 export const home = () => process.env.BWALLETX_HOME || join(homedir(), '.bwalletx');

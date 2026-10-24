@@ -49,6 +49,13 @@ describe('withdrawFrom: gated like send', () => {
     expect(createAction).not.toHaveBeenCalled();
   });
 
+  test('a per-call limit caps "all" too (MCP passes BWALLETX_MCP_MAX_USD)', async () => {
+    const { w, createAction } = fakeWallet();
+    // 10,000,000 sats at $50 = $5 > $1
+    await expect(withdrawFrom('t', w, { amount: 'all', address: to, have: 10_000_300, rate: 50, maxUsd: 1 })).rejects.toThrow(/per-call limit/);
+    expect(createAction).not.toHaveBeenCalled();
+  });
+
   test('more than the wallet holds is refused', async () => {
     const { w, createAction } = fakeWallet();
     await expect(withdrawFrom('t', w, { amount: 1000, address: to, have: 10, rate: 50 })).rejects.toThrow(/Can't send/);

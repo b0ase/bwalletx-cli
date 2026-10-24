@@ -529,9 +529,10 @@ program
   .option('--max-usd <n>', 'most one payment from a site may move, in USD', '1')
   .option('--budget-usd <n>', 'most this serve session may move in total, in USD', '5')
   .option('--allow-any-origin', "allow --origin '*' (any web page on this machine)")
+  .option('--allow-token-transfers', 'let sites move BSV-21 tokens / ordinals (the USD caps cannot value them)')
   .action(
-    run(async (o: { account?: string; origin: string[]; port: string; shared?: boolean; wallet?: string; maxUsd: string; budgetUsd: string; allowAnyOrigin?: boolean }) => {
-      const limits = { maxUsdPerAction: Number(o.maxUsd), sessionBudgetUsd: Number(o.budgetUsd), allowAnyOrigin: !!o.allowAnyOrigin };
+    run(async (o: { account?: string; origin: string[]; port: string; shared?: boolean; wallet?: string; maxUsd: string; budgetUsd: string; allowAnyOrigin?: boolean; allowTokenTransfers?: boolean }) => {
+      const limits = { maxUsdPerAction: Number(o.maxUsd), sessionBudgetUsd: Number(o.budgetUsd), allowAnyOrigin: !!o.allowAnyOrigin, allowTokenTransfers: !!o.allowTokenTransfers };
       if (!(limits.maxUsdPerAction >= 0) || !(limits.sessionBudgetUsd >= 0)) throw new Error('--max-usd and --budget-usd must be numbers >= 0');
       const kind = o.wallet ?? (o.shared ? 'shared' : 'local');
       if (!['local', 'shared', 'paired'].includes(kind)) throw new Error(`--wallet must be local, shared or paired (got "${kind}")`);

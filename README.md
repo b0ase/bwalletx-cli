@@ -117,7 +117,20 @@ find it the same way they find BSV Desktop. Built on `@bsv/wallet-toolbox`; keys
   (its outputs minus what the site's own inputs bring in), so the kill switch, daily cap, rate limit and a
   loaded strategy all apply. Refusals reach the site as a readable wallet error.
 - **Log**: every spend and signature lands in the activity log with the site and txid.
+- **Limits**: one payment from a site may move at most `--max-usd` (default $1) and the session at most
+  `--budget-usd` (default $5).
+- **Tokens**: the caps value satoshis only, and a BSV-21 token output is 1 sat however much the token is
+  worth. So a `createAction` with a BSV-20/21 inscribed output, or one that names the wallet's own outputs
+  as inputs, is refused unless serve runs with `--allow-token-transfers`.
 - Paired accounts can't serve: their keys stay on the phone.
+
+## Default limits
+
+- New accounts (import or pairing) start with a **$10/day cap**. Change it with `bwalletx cap <account> <usd>`,
+  or `off` to clear it. Existing accounts keep their setting.
+- MCP `send` and `brc100_withdraw` move at most **$5 per call** (`BWALLETX_MCP_MAX_USD` in the MCP server env
+  changes it). `brc100_withdraw` with `usd: "all"` also needs `confirmAll: true`, and the per-call limit
+  still applies.
 
 ## The gate
 

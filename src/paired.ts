@@ -26,7 +26,7 @@ import {
   type HelloFrame,
   type PairMessage,
 } from './pair/protocol.js';
-import { home, readConfig, readJsonFile, writeConfig, writeJsonFile } from './store.js';
+import { DEFAULT_DAILY_CAP_USD, home, readConfig, readJsonFile, writeConfig, writeJsonFile } from './store.js';
 
 export const CLI_ORIGIN = 'https://cli.bwalletx.com';
 const CALL_TIMEOUT_MS = 75_000;
@@ -156,7 +156,7 @@ function round(name: string, mode: 'agent' | 'brc100', out: (s: string) => void)
           identityAddress: i.identityAddress,
           payAddress: '',
           ordAddress: '',
-          dailyCapUsd: null,
+          dailyCapUsd: cfg.accounts[name]?.dailyCapUsd !== undefined ? cfg.accounts[name].dailyCapUsd : DEFAULT_DAILY_CAP_USD,
           stopped: false,
           importedAt: Date.now(),
         };
