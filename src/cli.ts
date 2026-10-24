@@ -526,8 +526,13 @@ program
   .option('--shared', 'alias for --wallet shared')
   .requiredOption('-o, --origin <host...>', 'sites allowed to use the wallet, e.g. www.tokenblaster.lol localhost:3000')
   .option('-p, --port <n>', 'port', '3321')
+  .option('--max-usd <n>', 'most one payment from a site may move, in USD', '1')
+  .option('--budget-usd <n>', 'most this serve session may move in total, in USD', '5')
+  .option('--allow-any-origin', "allow --origin '*' (any web page on this machine)")
   .action(
-    run(async (o: { account?: string; origin: string[]; port: string; shared?: boolean; wallet?: string }) => {
+    run(async (o: { account?: string; origin: string[]; port: string; shared?: boolean; wallet?: string; maxUsd: string; budgetUsd: string; allowAnyOrigin?: boolean }) => {
+      const limits = { maxUsdPerAction: Number(o.maxUsd), sessionBudgetUsd: Number(o.budgetUsd), allowAnyOrigin: !!o.allowAnyOrigin };
+      if (!(limits.maxUsdPerAction >= 0) || !(limits.sessionBudgetUsd >= 0)) throw new Error('--max-usd and --budget-usd must be numbers >= 0');
       const kind = o.wallet ?? (o.shared ? 'shared' : 'local');
       if (!['local', 'shared', 'paired'].includes(kind)) throw new Error(`--wallet must be local, shared or paired (got "${kind}")`);
       if (o.shared && kind !== 'shared') throw new Error('--shared conflicts with --wallet ' + kind);
@@ -540,7 +545,7 @@ program
         if (p.mode !== 'brc100') throw new Error(`"${n}" is an agent pairing, not a main-wallet one. Run \`bwalletx pair --main\`.`);
         const b = await import('./brc100.js');
         const w = await b.pairedBackend(n);
-        await b.serve(w, { account: n, origins: o.origin, port: Number(o.port), onEvent: log });
+        await b.serve(w, { account: n, origins: o.origin, port: Number(o.port), onEvent: log, ...limits });
         console.log(`Your paired bWalletX (${p.account}) is a BRC-100 wallet on http://localhost:${o.port}`);
         console.log(`  allowed: ${o.origin.join(', ')}`);
         console.log('  keys stay on the phone: keep bWalletX open and unlocked; it approves every spend. No local fallback. Ctrl-C to stop.');
@@ -551,7 +556,7 @@ program
       const { name, b, w } = await brc100Account(o.account, kind === 'shared');
       w.startMonitor();
       const sats = await b.walletBalance(w).catch(() => 0);
-      await b.serve(w, { account: name, origins: o.origin, port: Number(o.port), onEvent: (l) => console.log(`${new Date().toLocaleTimeString()}  ${l}`) });
+      await b.serve(w, { account: name, origins: o.origin, port: Number(o.port), onEvent: (l) => console.log(`${new Date().toLocaleTimeString()}  ${l}`), ...limits });
       console.log(`bWalletX agent "${name}" is a BRC-100 wallet on http://localhost:${o.port}`);
       console.log(`  identity key ${w.identityKey}`);
       console.log(`  balance ${sats.toLocaleString()} sats${sats ? '' : ' (run `bwalletx brc100 fund` to move the pay address in)'}`);

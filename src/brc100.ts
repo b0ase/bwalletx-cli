@@ -402,12 +402,42 @@ export type ServeOptions = {
   arc?: (result: unknown) => Promise<void>;
   /** For tests: BSV price instead of fetching it. */
   usdPerBsv?: () => Promise<number>;
+  /** Most one createAction may move, in USD, whatever the account's own caps say. Default SERVE_MAX_USD_PER_ACTION. */
+  maxUsdPerAction?: number;
+  /** Most this serve session may move in total, in USD. Default SERVE_SESSION_BUDGET_USD. */
+  sessionBudgetUsd?: number;
+  /** Allow `--origin '*'` (any web page on this machine can drive the wallet). Off by default. */
+  allowAnyOrigin?: boolean;
+};
+
+/**
+ * Defaults for automatic payments from sites (24 Oct 2026 audit, after the x402 SDK findings): an account
+ * with no daily cap and no approval threshold must not be drainable by one 402 asking for everything.
+ */
+export const SERVE_MAX_USD_PER_ACTION = 1;
+export const SERVE_SESSION_BUDGET_USD = 5;
+
+/**
+ * BRC-103/104 mutual-auth signatures and nonces. Keys are derived per counterparty, not per site, so an
+ * allowed site could ask for a login signature addressed to ANOTHER site's server and relay it. Those are
+ * only signed when serve allows a single origin, so the requester is the only site the login can be for.
+ */
+const AUTH_PROTOCOLS = new Set(['auth message signature', 'server hmac']);
+export const isAuthProtocolCall = (call: string, args: unknown) => {
+  if (!['createSignature', 'createHmac'].includes(call)) return false;
+  const p = (args as { protocolID?: unknown } | null)?.protocolID;
+  return Array.isArray(p) && typeof p[1] === 'string' && AUTH_PROTOCOLS.has(p[1].trim().toLowerCase());
 };
 
 /** Serve a wallet over the BRC-100 HTTP JSON substrate. Resolves once listening. */
 export async function serve(input: AgentWallet | ServeWallet, o: ServeOptions) {
   const w: ServeWallet = 'call' in input ? input : localBackend(input);
   const allowed = new Set(o.origins.map(hostOf));
+  if (allowed.has('*') && !o.allowAnyOrigin) throw new Error("bwalletx serve: --origin '*' lets any web page spend from this wallet; name the sites instead (or pass --allow-any-origin)");
+  const maxPerAction = o.maxUsdPerAction ?? SERVE_MAX_USD_PER_ACTION;
+  const budget = o.sessionBudgetUsd ?? SERVE_SESSION_BUDGET_USD;
+  let sessionSpentUsd = 0;
+  const singleSite = allowed.size === 1 && !allowed.has('*');
   const say = o.onEvent ?? (() => undefined);
   const arc = o.arc ?? relayToArc;
   const price = o.usdPerBsv ?? bsvUsd;
@@ -464,23 +494,36 @@ export async function serve(input: AgentWallet | ServeWallet, o: ServeOptions) {
     // createAction/signAction: gate → sign → log under the account's spend lock, so parallel requests
     // (or another process on the same account) can't all pass the daily cap before any is logged.
     const spends = call === 'createAction' || call === 'signAction';
-    return spends ? withSpendLock(o.account, () => run(res, call, args, host, origin)) : run(res, call, args, host, origin);
+    return spends ? withSpendLock(o.account, () => runAndRefund(res, call, args, host, origin)) : run(res, call, args, host, origin);
   };
 
   const run = async (res: ServerResponse, call: string, args: Record<string, unknown>, host: string, origin: string) => {
     let sats = 0;
+    if (isAuthProtocolCall(call, args) && !singleSite) {
+      say(`refused ${host} ${call}: login signatures need serve to allow exactly one site`);
+      return send(res, 400, refusal('bwalletx serve: login (BRC-103) signatures are only made when one site is allowed; restart with a single --origin'), origin);
+    }
     if (call === 'createAction') {
       const a = args as unknown as CreateActionArgs;
       const owned = a.inputs?.length && w.owned ? await w.owned().catch(() => null) : new Set<string>();
       if (!owned) return send(res, 503, refusal('bwalletx serve: could not read the wallet to check inputs; try again'), origin);
       sats = outgoingSats(a, owned);
       const usd = sats ? (sats / 1e8) * (await price()) : 0;
+      if (usd > maxPerAction + 1e-9) {
+        say(`REFUSED ${host} createAction (${sats} sats, $${usd.toFixed(2)}): over the $${maxPerAction} per-payment cap`);
+        return send(res, 400, refusal(`bWalletX agent refused: $${usd.toFixed(2)} is over the $${maxPerAction} per-payment cap for sites`), origin);
+      }
+      if (sessionSpentUsd + usd > budget + 1e-9) {
+        say(`REFUSED ${host} createAction (${sats} sats): session budget $${budget} used`);
+        return send(res, 400, refusal(`bWalletX agent refused: this serve session's $${budget} budget is used ($${sessionSpentUsd.toFixed(2)} spent)`), origin);
+      }
       const g = gateAction(o.account, { kind: 'send', token: 'BSV', usd, to: host });
       if (!g.ok) {
         say(`REFUSED ${host} createAction (${sats} sats): ${g.reason}`);
         return send(res, 400, refusal(`bWalletX agent refused: ${g.reason}`), origin);
       }
       if (g.paper) return send(res, 400, refusal('bWalletX agent is in paper mode: nothing is signed'), origin);
+      sessionSpentUsd += usd; // reserved under the spend lock; a failed sign below gives it back
     }
 
     try {
@@ -507,6 +550,11 @@ export async function serve(input: AgentWallet | ServeWallet, o: ServeOptions) {
       if (err.name === 'WERR_INSUFFICIENT_FUNDS') return send(res, 400, { isError: true, code: 7, totalSatoshisNeeded: err.totalSatoshisNeeded, moreSatoshisNeeded: err.moreSatoshisNeeded }, origin);
       send(res, 400, refusal(err.message ?? String(e)), origin);
     }
+  };
+  const runAndRefund = async (res: ServerResponse, call: string, args: Record<string, unknown>, host: string, origin: string) => {
+    const before = sessionSpentUsd;
+    await run(res, call, args, host, origin);
+    if (res.statusCode !== 200 && sessionSpentUsd > before) sessionSpentUsd = before;
   };
 
   const server = createServer((req, res) => {
