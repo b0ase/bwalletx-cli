@@ -22,6 +22,7 @@ const phoneDo = async (name: string, action: string, params: unknown): Promise<{
 };
 import { parseStrategy, type Loaded, type PaperBook, type AgentLogEntry } from './strategy.js';
 import {
+  DEFAULT_DAILY_CAP_USD,
   allStopped,
   appendLog,
   getLoaded,
@@ -76,7 +77,8 @@ export async function importKey(file: string, passphrase?: string) {
     identityAddress: parsed.identityAddress,
     payAddress: addressOf(keys.payPk),
     ordAddress: addressOf(keys.ordPk),
-    dailyCapUsd: prev?.dailyCapUsd ?? null,
+    // New accounts get the default cap; a re-import keeps the account's setting (even "off").
+    dailyCapUsd: prev ? prev.dailyCapUsd : DEFAULT_DAILY_CAP_USD,
     approveAboveUsd: prev?.approveAboveUsd ?? null,
     identityKey: PrivateKey.fromWif(keys.identityPk).toPublicKey().toString(),
     payPubkey: PrivateKey.fromWif(keys.payPk).toPublicKey().toString(),

@@ -13,7 +13,7 @@ import * as act from './actions.js';
 import * as b1 from './brc100Actions.js';
 import * as mint from './mint.js';
 import * as sell from './sell.js';
-import { allStopped, appendLog, getLoaded, readConfig, resolveAccount, setAllStopped } from './store.js';
+import { allStopped, appendLog, getLoaded, mcpMaxUsdPerCall, readConfig, resolveAccount, setAllStopped } from './store.js';
 
 const json = (v: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(v, null, 2) }] });
 const wrap =
@@ -45,10 +45,14 @@ export async function runMcp(version: string) {
     'send',
     {
       description:
-        'Send BSV worth `usd` dollars to an address or paymail. Gated: kill switch, daily cap, rate limit, strategy rules (token "BSV" and sendTo must allow it). Paper mode never signs. Live needs BWALLETX_PASSPHRASE in the server env (key-file accounts) or a paired phone with bWalletX open.',
+        'Send BSV worth `usd` dollars to an address or paymail. Gated: per-call limit (BWALLETX_MCP_MAX_USD, default $5), kill switch, daily cap, rate limit, strategy rules (token "BSV" and sendTo must allow it). Paper mode never signs. Live needs BWALLETX_PASSPHRASE in the server env (key-file accounts) or a paired phone with bWalletX open.',
       inputSchema: { usd: z.number().positive(), to: z.string(), account },
     },
-    wrap(({ usd, to, account: a }: { usd: number; to: string; account?: string }) => act.send(usd, to, a)),
+    wrap(({ usd, to, account: a }: { usd: number; to: string; account?: string }) => {
+      const max = mcpMaxUsdPerCall();
+      if (usd > max + 1e-9) return { ok: false, text: `Refused: $${usd} is over the $${max} per-call limit for MCP sends (BWALLETX_MCP_MAX_USD)` };
+      return act.send(usd, to, a);
+    }),
   );
   server.registerTool(
     'buy',
@@ -152,10 +156,21 @@ export async function runMcp(version: string) {
     'brc100_withdraw',
     {
       description:
-        'Send BSV worth `usd` dollars ("all" for everything) from the BRC-100 wallet to an address. Gated like send: kill switch, daily cap, rate limit, strategy rules; paper mode refuses (nothing signed). Logged; relayed to ARC. Needs BWALLETX_PASSPHRASE.',
-      inputSchema: { usd: z.union([z.number().positive(), z.literal('all')]), address: z.string(), account, wallet },
+        'Send BSV worth `usd` dollars ("all" for everything, which also needs confirmAll: true) from the BRC-100 wallet to an address. Gated like send: per-call limit (BWALLETX_MCP_MAX_USD, default $5, applies to "all" too), kill switch, daily cap, rate limit, strategy rules; paper mode refuses (nothing signed). Logged; relayed to ARC. Needs BWALLETX_PASSPHRASE.',
+      inputSchema: {
+        usd: z.union([z.number().positive(), z.literal('all')]),
+        address: z.string(),
+        confirmAll: z.boolean().optional().describe('Must be true when usd is "all"'),
+        account,
+        wallet,
+      },
     },
-    wrap(({ usd, address, account: a, wallet: w }: { usd: number | 'all'; address: string; account?: string; wallet?: 'local' | 'shared' }) => b1.brc100Withdraw(usd, address, a, isShared(w))),
+    wrap(({ usd, address, confirmAll, account: a, wallet: w }: { usd: number | 'all'; address: string; confirmAll?: boolean; account?: string; wallet?: 'local' | 'shared' }) => {
+      if (usd === 'all' && confirmAll !== true) return { ok: false, text: 'Refused: withdrawing everything needs confirmAll: true' };
+      const max = mcpMaxUsdPerCall();
+      if (usd !== 'all' && usd > max + 1e-9) return { ok: false, text: `Refused: $${usd} is over the $${max} per-call limit for MCP withdrawals (BWALLETX_MCP_MAX_USD)` };
+      return b1.brc100Withdraw(usd, address, a, isShared(w), max);
+    }),
   );
   const mintOpts = {
     account: z.string().optional().describe('Paired account (pairing scope "Mint NFTs")'),
